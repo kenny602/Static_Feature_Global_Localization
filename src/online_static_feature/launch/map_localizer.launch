@@ -1,0 +1,61 @@
+<launch>
+  <!-- offline 맵 pcd (plane/corner 두 파일이면 path2에 추가) -->
+  <arg name="map_pcd_path" default="/home/rain/offline_static_feature_ws/src/output_corner_define_pcd/ETRI_노은역/ETRI_20cm_v2_surface.pcd" />
+  <arg name="map_pcd_path2" default="/home/rain/offline_static_feature_ws/src/output_corner_define_pcd/ETRI_노은역/ETRI_20cm_v2_corner.pcd" />
+
+  <!-- 실험 스위치 -->
+  <arg name="matcher_type" default="vgicp" />        <!-- ndt | gicp | vgicp | icp | plane_icp -->
+  <arg name="source_mode"  default="features" />   <!-- features | accumulated -->
+
+  <!-- small_gicp OpenMP 스레드 수 (ndt에는 적용되지 않음: PCL NDT는 단일 스레드) -->
+  <arg name="sg_num_threads" default="6" />
+
+  <!-- LSMCL initialize 가정: 수동 초기 pose (map 좌표계, radian).
+       offline map은 세션 시작 pose를 원점으로 생성되어 있다
+       (PCD_RESULT/map_trajectory.pcd가 (0,0,0)에서 heading +x로 출발).
+       따라서 map 생성 세션과 같은 bag을 재생하는 self-localization에서는 전부 0.
+       다른 세션 bag이면 그 세션의 실제 시작 pose로 바꿔야 한다. -->
+  <arg name="init_x" default="0.0" />
+  <arg name="init_y" default="0.0" />
+  <arg name="init_z" default="0.0" />
+  <arg name="init_yaw" default="0.0" />
+
+  <!-- 출력 파일 (매 실행 덮어씀) -->
+  <arg name="output_dir"
+       default="/home/rain/online_static_feature_ws/output/map_localizer/ETRI_노은역/small_gicp" />
+  <arg name="log_csv_path" default="$(arg output_dir)/JH_map_localizer_1.csv" />
+  <arg name="traj_pcd_path" default="$(arg output_dir)/JH_map_localizer_1.pcd" />
+
+  <node pkg="online_static_feature" type="map_localizer_node"
+        name="map_localizer" output="screen">
+    <param name="map_pcd_path"  value="$(arg map_pcd_path)" />
+    <param name="map_pcd_path2" value="$(arg map_pcd_path2)" />
+    <param name="matcher_type"  value="$(arg matcher_type)" />
+    <param name="source_mode"   value="$(arg source_mode)" />
+
+    <param name="plane_feature_topic"
+           value="/online_static_feature_node/scan_plane_features" />
+    <param name="corner_feature_topic"
+           value="/online_static_feature_node/scan_corner_features" />
+    <param name="accumulated_topic"
+           value="/online_static_feature_node/accumulated_cloud" />
+    <param name="odom_pose_topic"
+           value="/scan_matching_accumulator_node/scan_matching_pose" />
+
+    <param name="init_x" value="$(arg init_x)" />
+    <param name="init_y" value="$(arg init_y)" />
+    <param name="init_z" value="$(arg init_z)" />
+    <param name="init_yaw" value="$(arg init_yaw)" />
+
+    <param name="map_voxel_leaf" value="0.2" />
+    <param name="ndt_resolution" value="1.0" />
+    <param name="sg_downsample_resolution" value="0.2" />
+    <param name="sg_voxel_resolution" value="1.0" />   <!-- VGICP GaussianVoxelMap 복셀 크기 [m] -->
+    <param name="sg_num_threads" value="$(arg sg_num_threads)" />
+    <param name="max_correction_trans" value="5.0" />
+    <param name="max_correction_rot_deg" value="30.0" />
+
+    <param name="log_csv_path" value="$(arg log_csv_path)" />
+    <param name="traj_pcd_path" value="$(arg traj_pcd_path)" />
+  </node>
+</launch>

@@ -1,0 +1,31 @@
+<launch>
+  <arg name="input_dir" default="/home/rain/data/ETRI_노은역/PCD_RESULT" />
+  <arg name="output_root" default="/home/rain/online_static_feature_ws/output/pcd_window_features/ETRI_노은역/planar_downsampled" />
+  <arg name="window_frames" default="1" />
+  <arg name="start_index" default="0" />
+  <arg name="end_index" default="1832" />
+  <arg name="zero_pad" default="5" />
+  <arg name="save_window_features" default="true" />
+  <arg name="save_accumulated_windows" default="false" />
+  <arg name="require_full_window" default="true" />
+
+  <node pkg="online_static_feature"
+        type="pcd_window_feature_batch_node"
+        name="pcd_window_feature_batch_node"
+        output="screen">
+    <rosparam command="load"
+              file="$(find online_static_feature)/config/gis_online_feature.yaml" />
+
+    <param name="input_dir" value="$(arg input_dir)" />
+    <param name="output_dir" value="$(arg output_root)/window_$(arg window_frames)" />
+    <param name="merged_output"
+           value="$(arg output_root)/window_$(arg window_frames)/merged/merged_static_features_window_$(arg window_frames).pcd" />
+    <param name="window_frames" value="$(arg window_frames)" />
+    <param name="start_index" value="$(arg start_index)" />
+    <param name="end_index" value="$(arg end_index)" />
+    <param name="zero_pad" value="$(arg zero_pad)" />
+    <param name="save_window_features" value="$(arg save_window_features)" />
+    <param name="save_accumulated_windows" value="$(arg save_accumulated_windows)" />
+    <param name="require_full_window" value="$(arg require_full_window)" />
+  </node>
+</launch>

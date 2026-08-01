@@ -1,0 +1,13 @@
+실행 방법
+
+cd /home/rain/online_static_feature_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+roslaunch online_static_feature online_static_feature.launch
+
+LAS_PCL_ROS1 쪽은 별도 터미널:
+
+cd /home/rain/las_pcl_ROS1
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+roslaunch las_pcl pcl_pub.launch

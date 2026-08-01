@@ -1,0 +1,64 @@
+# Online scan-side feature extraction defaults for GIS LAS replay.
+# These values follow the GIS map-tuning file from generalize_static_feature_ws,
+# with floor alignment disabled because /lidar_pose already places scans in map.
+
+use_downsample: 0
+downsample_size: 0.05
+
+use_floor_align: 0
+floor_z_percentile: 10.0
+floor_ransac_thresh: 0.05
+floor_ransac_iters: 1000
+
+voxel_size: 0.2
+n_voxel_min: 3
+n_pillar_min: 3
+
+use_voxel_filter: 0
+voxel_s_thresh: 0.25
+
+simulate_no_ceiling: 0
+ceiling_cut_percentile: 18.0
+
+use_span_filter: 1
+H_min_voxel: 0
+fill_ratio_thresh: 0.4
+horiz_normal_thresh: 0.9
+
+use_floor_height_filter: 0
+floor_height_radius: 5
+floor_height_max: 0.7
+
+phi_mean_thresh: 0.4
+phi_std_thresh: 0.4
+
+use_unknown_space_filter: 0
+unknown_radius: 5
+unknown_ratio_thresh: 0.2
+unknown_sparse_fill_thresh: 0.2
+
+# s_thresh: 0.0005
+s_thresh: 0.0005
+use_weight: 1
+n_ref: 6.0
+mu_thresh: 0.6
+sigma_thresh: 0.6
+
+use_voxel_corner: 1
+corner_multiplier: 15.0
+use_corner_downsample: 0
+
+# Coordinate convention.
+# The PCD map in /home/rain/data/국토부_GIS_map/pcd_map was generated with
+# local_origin_mode=first, so online scan features subtract the same first LAS
+# point after applying /lidar_pose.
+local_origin_mode: las_first
+origin_las_path: /home/rain/data/국토부_GIS_map/20250730072521533_gps_sorted.las
+
+# Accumulated colored online feature map.
+publish_feature_history: true
+feature_history_topic: feature_map_colored
+save_on_shutdown_pcd: false
+save_feature_history_path: /home/rain/online_static_feature_ws/output/pcd_map/online_static_features_20cm복셀.pcd
+max_feature_history_points: 200000000
+

@@ -1,0 +1,41 @@
+<launch>
+  <arg name="cloud_topic" default="/Pointcloud2" />
+  <arg name="pose_topic" default="/lidar_pose" />
+  <arg name="map_frame" default="map" />
+  <arg name="window_frames" default="4" />
+  <arg name="publish_every_n_frames" default="4" />
+  <!-- <arg name="transform_with_pose" default="true" /> -->
+  <arg name="transform_with_pose" default="false" />
+  <!-- <arg name="local_origin_mode" default="las_first" /> -->
+  <arg name="local_origin_mode" default="none" />
+  <arg name="origin_las_path" default="/home/rain/data/국토부_GIS_map/20250730072521533_gps_sorted.las" />
+  <arg name="publish_feature_history" default="false" />
+  <arg name="save_on_shutdown_pcd" default="true" />
+  <arg name="max_feature_history_points" default="2000000" />
+  <arg name="save_feature_history_path" default="/home/rain/online_static_feature_ws/output/pcd_map/LAS/nRef50_3frame.pcd" />
+  <arg name="latency_log_enabled" default="true" />
+  <arg name="latency_log_path" default="/home/rain/online_static_feature_ws/output/latency_csv/LAS/nRef50_3_frame_latency.csv" />
+
+  <node pkg="online_static_feature"
+        type="online_static_feature_node"
+        name="online_static_feature_node"
+        output="screen">
+    <rosparam command="load"
+              file="$(find online_static_feature)/config/gis_online_feature.yaml" />
+
+    <param name="cloud_topic" value="$(arg cloud_topic)" />
+    <param name="pose_topic" value="$(arg pose_topic)" />
+    <param name="map_frame" value="$(arg map_frame)" />
+    <param name="window_frames" value="$(arg window_frames)" />
+    <param name="publish_every_n_frames" value="$(arg publish_every_n_frames)" />
+    <param name="transform_with_pose" value="$(arg transform_with_pose)" />
+    <param name="local_origin_mode" value="$(arg local_origin_mode)" />
+    <param name="origin_las_path" value="$(arg origin_las_path)" />
+    <param name="publish_feature_history" value="$(arg publish_feature_history)" />
+    <param name="save_on_shutdown_pcd" value="$(arg save_on_shutdown_pcd)" />
+    <param name="max_feature_history_points" value="$(arg max_feature_history_points)" />
+    <param name="save_feature_history_path" value="$(arg save_feature_history_path)" />
+    <param name="latency_log_enabled" value="$(arg latency_log_enabled)" />
+    <param name="latency_log_path" value="$(arg latency_log_path)" />
+  </node>
+</launch>

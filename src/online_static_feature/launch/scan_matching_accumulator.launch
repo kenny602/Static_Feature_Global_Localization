@@ -1,0 +1,47 @@
+<launch>
+  <arg name="input_topic" default="/ouster/points" />
+  <arg name="odom_frame" default="odom" />
+  <arg name="window_frames" default="3" />
+  <arg name="submap_frames" default="1" />
+  <arg name="publish_every_n_frames" default="1" />
+  <arg name="registration_type" default="VGICP" />
+  <arg name="registration_leaf_size" default="0.5" />
+  <arg name="dense_leaf_size" default="0.0" />
+  <arg name="max_correspondence_distance" default="2.0" />
+  <arg name="voxel_resolution" default="1.0" />
+  <arg name="num_threads" default="4" />
+  <arg name="min_range" default="1.0" />
+  <arg name="max_range" default="120.0" />
+  <arg name="z_min" default="-3.0" />
+  <arg name="z_max" default="8.0" />
+  <arg name="publish_submap" default="false" />
+  <arg name="publish_only_full_window" default="true" />
+  <arg name="latency_log_enabled" default="true" />
+  <arg name="latency_log_path"
+       default="/home/rain/online_static_feature_ws/output/bag_scan_matching/scan_matching_accumulator_latency.csv" />
+
+  <node pkg="online_static_feature"
+        type="scan_matching_accumulator_node"
+        name="scan_matching_accumulator_node"
+        output="screen">
+    <param name="input_topic" value="$(arg input_topic)" />
+    <param name="odom_frame" value="$(arg odom_frame)" />
+    <param name="window_frames" value="$(arg window_frames)" />
+    <param name="submap_frames" value="$(arg submap_frames)" />
+    <param name="publish_every_n_frames" value="$(arg publish_every_n_frames)" />
+    <param name="registration_type" value="$(arg registration_type)" />
+    <param name="registration_leaf_size" value="$(arg registration_leaf_size)" />
+    <param name="dense_leaf_size" value="$(arg dense_leaf_size)" />
+    <param name="max_correspondence_distance" value="$(arg max_correspondence_distance)" />
+    <param name="voxel_resolution" value="$(arg voxel_resolution)" />
+    <param name="num_threads" value="$(arg num_threads)" />
+    <param name="min_range" value="$(arg min_range)" />
+    <param name="max_range" value="$(arg max_range)" />
+    <param name="z_min" value="$(arg z_min)" />
+    <param name="z_max" value="$(arg z_max)" />
+    <param name="publish_submap" value="$(arg publish_submap)" />
+    <param name="publish_only_full_window" value="$(arg publish_only_full_window)" />
+    <param name="latency_log_enabled" value="$(arg latency_log_enabled)" />
+    <param name="latency_log_path" value="$(arg latency_log_path)" />
+  </node>
+</launch>

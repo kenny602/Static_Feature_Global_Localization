@@ -1,0 +1,22 @@
+# Catkin / CMake build products
+build/
+devel/
+install/
+log/
+.catkin_tools/
+
+# Generated data and experiment outputs
+output/
+*.pcd
+*.bag
+*.db3
+
+# Local/editor/system files
+*.desktop
+.DS_Store
+.vscode/
+.idea/
+
+# Python cache files
+__pycache__/
+*.py[cod]
