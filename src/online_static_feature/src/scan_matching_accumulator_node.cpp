@@ -35,6 +35,7 @@ using PointXYZI = pcl::PointXYZI;
 using CloudXYZ = pcl::PointCloud<PointXYZ>;
 using CloudXYZI = pcl::PointCloud<PointXYZI>;
 
+// 노드 내부 pose표현인 Matrix4f를 small-GICP가 사용하는 Isometry3d로 변환
 Eigen::Isometry3d matrixToIsometry(const Eigen::Matrix4f &m)
 {
     Eigen::Isometry3d iso = Eigen::Isometry3d::Identity();
@@ -42,20 +43,23 @@ Eigen::Isometry3d matrixToIsometry(const Eigen::Matrix4f &m)
     return iso;
 }
 
+// small-GICP 결과를 노드 내부 pose표현으로 되돌림
 Eigen::Matrix4f isometryToMatrix(const Eigen::Isometry3d &iso)
 {
     return iso.matrix().cast<float>();
 }
 
+// pcl 포인트를 small-GICP가 받는 homogeneous 좌표 벡터로 변환
 std::vector<Eigen::Vector4f> cloudToEigenPoints(const CloudXYZ::Ptr &cloud)
 {
     std::vector<Eigen::Vector4f> points;
     points.reserve(cloud->size());
     for (const auto &p : cloud->points)
-        points.emplace_back(p.x, p.y, p.z, 1.0f);
+        points.emplace_back(p.x, p.y, p.z, 1.0f); // 1은 translation 적용을 위함
     return points;
 }
 
+// 문자열 파라미터(정합 모드)를 small-GICP enum으로 변환함
 small_gicp::RegistrationSetting::RegistrationType parseRegistrationType(
     const std::string &type)
 {
@@ -72,6 +76,7 @@ small_gicp::RegistrationSetting::RegistrationType parseRegistrationType(
     return small_gicp::RegistrationSetting::GICP;
 }
 
+// 4x4 pose 행렬을 ROS의 PoseStamped로 변환
 geometry_msgs::PoseStamped poseMsgFromMatrix(const Eigen::Matrix4f &T,
                                              const ros::Time &stamp,
                                              const std::string &frame_id)
@@ -98,8 +103,9 @@ class ScanMatchingAccumulatorNode
 {
 public:
     ScanMatchingAccumulatorNode()
-        : nh_(),
-          pnh_("~")
+        // ros::NodeHandle: ROS 시스템과 연결되는 여러 리소스를 만드는 진입점
+        : nh_(),    // nh  = 일반 NodeHandle, namespace: 일반/현재 ROS namespace, 외부 토픽 subscribe
+          pnh_("~") // png = private NodeHandle (현재 노드의 private namespace를 사용하는 NodeHandle), 노드 전용 파라미터와 출력 토픽용
     {
         loadParams();
         initLatencyLog();
@@ -212,6 +218,10 @@ private:
 
     void loadParams()
     {
+        // pnh_.param("파라미터 이름", 저장할 변수, 기본값)
+        // 1. ROS parameter server에서 private 파라미터를 찾음 (launch나 yaml 등)
+        // 2. 존재하면 해당 값을 변수에 저장
+        // 3. 없으면 세 번째 인자의 기본값을 사용
         pnh_.param<std::string>("input_topic", input_topic_, input_topic_);
         pnh_.param<std::string>("odom_frame", odom_frame_, odom_frame_);
         pnh_.param<std::string>("dense_window_topic", dense_window_topic_,
@@ -267,11 +277,13 @@ private:
         min_registration_points_ = std::max(10, min_registration_points_);
     }
 
+    // 두 시점 사이를 ms로 변환
     static double elapsedMs(const TimePoint &start, const TimePoint &end)
     {
         return std::chrono::duration<double, std::milli>(end - start).count();
     }
 
+    // 실시간성 분석을 위한 latency CSV를 저장할 디렉토리 생성 
     bool ensureParentDirectory(const std::string &path) const
     {
         const size_t slash = path.find_last_of('/');
@@ -311,6 +323,7 @@ private:
         return true;
     }
 
+    // CSV 파일을 열고 헤더 기록
     void initLatencyLog()
     {
         if (!latency_log_enabled_)
@@ -347,6 +360,7 @@ private:
                         << latency_log_path_);
     }
 
+    // 한 callback의 LatencyRecord를 CSV 한 줄로 저장함
     void writeLatencyLog(const LatencyRecord &r)
     {
         if (!latency_log_enabled_ || !latency_log_.is_open())
@@ -380,10 +394,12 @@ private:
         latency_log_.flush();
     }
 
+    // NaN 제거, small-GICP의 거리 및 높이 필터
+    // PointCloud2 -> PointXYZI 클라우드로 만듦
     CloudXYZI::Ptr preprocessRawCloud(const sensor_msgs::PointCloud2ConstPtr &msg) const
     {
         CloudXYZI::Ptr in(new CloudXYZI());
-        pcl::fromROSMsg(*msg, *in);
+        pcl::fromROSMsg(*msg, *in); // ROS 메세지를 PCL로 변환
 
         CloudXYZI::Ptr out(new CloudXYZI());
         out->reserve(in->size());
@@ -415,6 +431,7 @@ private:
         return out;
     }
 
+    // PointXYZI에서 PointXYZ로 바꿈 (스캔 매칭에서는 위치 정보만 필요하기 때문)
     CloudXYZ::Ptr toXYZ(const CloudXYZI::Ptr &cloud) const
     {
         CloudXYZ::Ptr xyz(new CloudXYZ());
@@ -434,6 +451,7 @@ private:
     }
 
     template <typename CloudT>
+    // PCL VoxelGrid 적용해서 다운샘플링 수행
     typename CloudT::Ptr voxelDownsample(const typename CloudT::Ptr &cloud,
                                          double leaf_size) const
     {
@@ -451,17 +469,26 @@ private:
         return filtered;
     }
 
+    // raw LiDAR cloud를 T_odom_lidar로 변환함
     CloudXYZI::Ptr transformCloud(const CloudXYZI::Ptr &cloud,
                                   const Eigen::Matrix4f &T) const
     {
         CloudXYZI::Ptr transformed(new CloudXYZI());
+        // pcl 라이브러리 -> 입력, 출력, 변환 pose
+        // 입력: LiDAR 좌표계 포인트, 출력: odom 좌표계 포인트
         pcl::transformPointCloud(*cloud, *transformed, T);
+        // transformPointCloud (const pcl::PointCloud<PointT> &cloud_in, 
+        //                pcl::PointCloud<PointT> &cloud_out, 
+        //                const Eigen::Vector3f &offset, 
+        //                const Eigen::Quaternionf &rotation,
+        //                bool copy_all_fields = true)
         transformed->width = static_cast<uint32_t>(transformed->size());
         transformed->height = 1;
         transformed->is_dense = true;
         return transformed;
     }
 
+    // 스캔 매칭 함수
     CloudXYZ::Ptr buildRegistrationSubmap() const
     {
         CloudXYZI::Ptr submap_xyzi(new CloudXYZI());
@@ -470,6 +497,7 @@ private:
             return CloudXYZ::Ptr(new CloudXYZ());
 
         size_t total_points = 0;
+        // frames_에 저장된 최근 과거 프레임들로 정합 target을 만듦
         for (int i = static_cast<int>(frames_.size()) - count;
              i < static_cast<int>(frames_.size()); ++i)
         {
@@ -480,28 +508,33 @@ private:
         for (int i = static_cast<int>(frames_.size()) - count;
              i < static_cast<int>(frames_.size()); ++i)
         {
+            // 각 과거 프레임은 아직 자신의 LiDAR 좌표계에 저장되어 있으므로 T_odom_lidar로 변환 필요
             CloudXYZI::Ptr aligned = transformCloud(frames_[i].raw,
                                                     frames_[i].T_odom_lidar);
-            *submap_xyzi += *aligned;
+            *submap_xyzi += *aligned; // odom 좌표계로 옮긴 프레임들을 모두 submap에 합침
         }
 
         return toXYZ(submap_xyzi);
     }
 
+    // 1. 과거 frame으로 target submap 생성
+    // 2. 현재 raw를 source로 변환
+    // 3. 이전 pose로 initial guess 생성
+    // 4. small-GICP 정합
     Eigen::Matrix4f estimatePose(const CloudXYZI::Ptr &raw,
                                  const ros::Time &stamp,
                                  LatencyRecord &latency)
     {
-        if (frames_.empty())
-            return Eigen::Matrix4f::Identity();
+        if (frames_.empty()) // 과거 프레임이 없으면
+            return Eigen::Matrix4f::Identity(); // 첫 LiDAR 위치를 odom 원점으로 정의
 
         TimePoint stage_start = SteadyClock::now();
-        CloudXYZ::Ptr target = buildRegistrationSubmap();
+        CloudXYZ::Ptr target = buildRegistrationSubmap(); // target 구성 -> 과거 프레임들을 odom 좌표계로 합친 submap
         TimePoint stage_end = SteadyClock::now();
         latency.submap_build_ms = elapsedMs(stage_start, stage_end);
 
         stage_start = SteadyClock::now();
-        CloudXYZ::Ptr source = toXYZ(raw);
+        CloudXYZ::Ptr source = toXYZ(raw); // source 구성 -> 현재 프레임은 아직 LiDAR 좌표계에 있음
         stage_end = SteadyClock::now();
         latency.source_prepare_ms = elapsedMs(stage_start, stage_end);
         latency.registration_target_points = target->size();
@@ -516,17 +549,18 @@ private:
                 << "target=" << target->size()
                 << ", source=" << source->size()
                 << ". Reusing previous pose.");
-            return frames_.back().T_odom_lidar;
+            return frames_.back().T_odom_lidar; // 정합에 필요한 포인트 수가 너무 적으면, 직전 pose 재사용
         }
 
-        Eigen::Matrix4f guess = frames_.back().T_odom_lidar;
-        if (use_constant_velocity_guess_ && frames_.size() >= 2)
-            guess = last_delta_ * frames_.back().T_odom_lidar;
+        Eigen::Matrix4f guess = frames_.back().T_odom_lidar;     // Initial guess 기본값 - 직전 pose
+        if (use_constant_velocity_guess_ && frames_.size() >= 2) // 상수 속도 모델이 활성화되고 과거 프레임이 2개 이상이면
+            guess = last_delta_ * frames_.back().T_odom_lidar;   // last_delta_: 직전 두 pose 간 변화량 (직전 이동량이 다음 프레임에도 반복 가정)
 
+        // 매 프레임마다 RegistrationSetting을 구성함
         small_gicp::RegistrationSetting setting;
         setting.type = parseRegistrationType(registration_type_);
         setting.num_threads = num_threads_;
-        setting.downsampling_resolution = registration_leaf_size_;
+        setting.downsampling_resolution = registration_leaf_size_; // small_gicp가 registration을 위해 내부적으로 사용할 downsampling 크기
         setting.max_correspondence_distance = max_correspondence_distance_;
         setting.voxel_resolution = voxel_resolution_;
         setting.max_iterations = max_iterations_;
@@ -542,18 +576,20 @@ private:
         stage_end = SteadyClock::now();
         latency.small_gicp_prepare_ms = elapsedMs(stage_start, stage_end);
 
+        // small-GICP 정합 시작
         stage_start = SteadyClock::now();
         const small_gicp::RegistrationResult result =
             small_gicp::align(target_points, source_points,
                               matrixToIsometry(guess), setting);
         stage_end = SteadyClock::now();
+
         latency.small_gicp_align_ms = elapsedMs(stage_start, stage_end);
         latency.registration_converged = result.converged ? 1 : 0;
         latency.registration_inliers = result.num_inliers;
         latency.registration_error = result.error;
 
         const Eigen::Matrix4f final_pose =
-            isometryToMatrix(result.T_target_source);
+            isometryToMatrix(result.T_target_source); // result.T_target_source가 바로 T_odom_lidar
         ROS_INFO_STREAM_THROTTLE(
             1.0,
             "[scan_matching_accumulator] stamp=" << stamp
@@ -567,9 +603,11 @@ private:
         return final_pose;
     }
 
+    // DenseWindow 만들기
     CloudXYZI::Ptr buildDenseWindow() const
     {
         CloudXYZI::Ptr dense(new CloudXYZI());
+        // 최근 window_frames_개의 raw frame들을 하나의 window로 합침
         const int count = std::min<int>(window_frames_, frames_.size());
         if (count <= 0)
             return dense;
@@ -582,6 +620,7 @@ private:
         }
         dense->reserve(total_points);
 
+        // 각 프레임은 자신의 센서 좌표계에 있으므로, 각자 다른 pose로 odom 좌표계로 옮김 
         for (int i = static_cast<int>(frames_.size()) - count;
              i < static_cast<int>(frames_.size()); ++i)
         {
@@ -594,9 +633,11 @@ private:
         dense->height = 1;
         dense->is_dense = true;
 
+        // dense_leaf_size_가 0보다 크면 VoxelGrid를 통한 다운샘플링을 적용함
         return voxelDownsample<CloudXYZI>(dense, dense_leaf_size_);
     }
 
+    // PCL PointXYZI 를 ROS PointCloud2로 바꿔서 발행함
     void publishCloud(const CloudXYZI::Ptr &cloud,
                       const ros::Publisher &pub,
                       const ros::Time &stamp,
@@ -606,12 +647,13 @@ private:
             return;
 
         sensor_msgs::PointCloud2 msg;
-        pcl::toROSMsg(*cloud, msg);
+        pcl::toROSMsg(*cloud, msg); // ROS로 바꿔서 발행
         msg.header.stamp = stamp;
-        msg.header.frame_id = frame_id;
+        msg.header.frame_id = frame_id; // 모든 포인트: odom 좌표계로 변환됐으므로 frame ID도 odom
         pub.publish(msg);
     }
 
+    // 메세지 & 시간 정보 기록
     void cloudCallback(const sensor_msgs::PointCloud2ConstPtr &msg)
     {
         const TimePoint callback_start = SteadyClock::now();
@@ -619,6 +661,7 @@ private:
         TimePoint stage_end = callback_start;
         LatencyRecord latency;
 
+        // 센서 timestamp와 실제 callback 처리 시각을 별도로 기록함
         ++callback_count_;
         latency.callback_index = callback_count_;
         latency.msg_stamp_sec = msg->header.stamp.toSec();
@@ -627,7 +670,7 @@ private:
             static_cast<size_t>(msg->width) * static_cast<size_t>(msg->height);
 
         stage_start = SteadyClock::now();
-        CloudXYZI::Ptr raw = preprocessRawCloud(msg);
+        CloudXYZI::Ptr raw = preprocessRawCloud(msg); // raw cloud 전처리
         stage_end = SteadyClock::now();
         latency.preprocess_ms = elapsedMs(stage_start, stage_end);
         latency.filtered_points = raw->size();
@@ -643,24 +686,31 @@ private:
             return;
         }
 
+        // 현재 pose 추정
         const Eigen::Matrix4f T_odom_lidar =
             estimatePose(raw, msg->header.stamp, latency);
 
+        // 현재 프레임을 버퍼에 저장
         stage_start = SteadyClock::now();
         Frame frame;
         frame.stamp = msg->header.stamp;
         frame.lidar_frame = msg->header.frame_id;
         frame.raw = raw;
         frame.T_odom_lidar = T_odom_lidar;
+        // 현재 프레임의 정합이 끝난 뒤 버퍼에 추가됨
+        // 이를 통해 현재 프레임은 다음 프레임이 들어왔을 때 registration target의 일부가 됨
         frames_.push_back(frame);
 
+        // 오래된 프레임 제거
         const int max_frames = std::max(window_frames_, submap_frames_);
         while (static_cast<int>(frames_.size()) > max_frames)
-            frames_.pop_front();
+            frames_.pop_front(); // 앞에서부터 제거
+        
         latency.window_size = std::min<int>(window_frames_, frames_.size());
         stage_end = SteadyClock::now();
         latency.buffer_ms = elapsedMs(stage_start, stage_end);
 
+        // pose 발행
         stage_start = SteadyClock::now();
         pose_pub_.publish(poseMsgFromMatrix(T_odom_lidar,
                                             msg->header.stamp,
@@ -684,6 +734,7 @@ private:
             return;
         }
 
+        // Dense window 발행 -> 이후 online_static_feature_node.cpp의 입력으로 들어감
         stage_start = SteadyClock::now();
         CloudXYZI::Ptr dense = buildDenseWindow();
         stage_end = SteadyClock::now();
@@ -696,6 +747,7 @@ private:
         latency.dense_window_publish_ms = elapsedMs(stage_start, stage_end);
         latency.dense_published = 1;
 
+        // Registration submap 발행
         if (publish_submap_)
         {
             stage_start = SteadyClock::now();

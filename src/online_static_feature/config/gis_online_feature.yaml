@@ -50,6 +50,15 @@ use_voxel_corner: 1
 corner_multiplier: 15.0
 use_corner_downsample: 0
 
+# PLANAR/CORNER 분류 사용 여부
+# 0 = 동적 객체 필터링(classifyPillar의 DYNAMIC/SKIP 판정)까지만 수행하고
+#     분류 없이 scan_static_features 단일 토픽으로 발행. voxel corner 탐색과
+#     색상 결정, plane/corner 분리를 건너뛰므로 연산이 줄어든다.
+#     출력 점 집합은 use_corner_downsample=0 기준으로 1일 때와 동일하다.
+# 1 = 기존 동작. 클래스 라벨을 쓰는 registration은 future work.
+# launch의 use_feature_classification 인자가 이 값을 덮어쓴다.
+use_feature_classification: 0
+
 # Planar(surface) feature voxel-filter 다운샘플 (KD-Tree 입력용, LSMCL 수식 17 관점)
 # corner는 손대지 않고 planar 점만 voxel당 centroid 1점으로 축약.
 # per-window(merge 전) 적용이라 작은 leaf(≤0.05m)에서도 VoxelGrid 오버플로 없음.

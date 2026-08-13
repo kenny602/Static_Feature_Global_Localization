@@ -9,6 +9,10 @@
   <!-- <arg name="local_origin_mode" default="las_first" /> -->
   <arg name="local_origin_mode" default="none" />
   <arg name="origin_las_path" default="/home/rain/data/국토부_GIS_map/20250730072521533_gps_sorted.las" />
+  <!-- 0 = 동적 객체 필터링까지만 수행하고 PLANAR/CORNER 분류를 건너뜀.
+       scan_static_features 단일 토픽으로 발행한다 (연산시간 비교 실험용). -->
+  <arg name="use_feature_classification" default="1" />
+  <arg name="static_feature_topic" default="scan_static_features" />
   <arg name="publish_feature_history" default="false" />
   <arg name="save_on_shutdown_pcd" default="true" />
   <arg name="max_feature_history_points" default="2000000" />
@@ -31,6 +35,8 @@
     <param name="transform_with_pose" value="$(arg transform_with_pose)" />
     <param name="local_origin_mode" value="$(arg local_origin_mode)" />
     <param name="origin_las_path" value="$(arg origin_las_path)" />
+    <param name="use_feature_classification" value="$(arg use_feature_classification)" />
+    <param name="static_feature_topic" value="$(arg static_feature_topic)" />
     <param name="publish_feature_history" value="$(arg publish_feature_history)" />
     <param name="save_on_shutdown_pcd" value="$(arg save_on_shutdown_pcd)" />
     <param name="max_feature_history_points" value="$(arg max_feature_history_points)" />

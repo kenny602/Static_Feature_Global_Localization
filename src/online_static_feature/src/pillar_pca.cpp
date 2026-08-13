@@ -1,5 +1,6 @@
 #include "pillar_pca.hpp"
 #include <Eigen/Dense>
+#include <chrono>
 #include <cmath>
 #include <algorithm>
 #include <numeric>
@@ -8,11 +9,26 @@
 
 // ─────────────────────────────────────────────────────────────────────────
 //  공통 헬퍼
+// 병목 분석용 누적기. thread_local이라 이후 OpenMP 병렬화에도 안전하다.
+// classifyAllPillars 진입 시 0으로 초기화하고, 종료 시 ClassifyTiming에 옮긴다.
+thread_local double g_eigen_voxel_ms = 0.0;
+thread_local long   g_eigen_voxel_cnt = 0;
+
 // ─────────────────────────────────────────────────────────────────────────
 static bool eigenDecompose(const std::vector<Eigen::Vector3f> &pts,
                             double &l1, double &l2, double &l3,
                             Eigen::Vector3d &evec_min)
 {
+    const auto t_eig0 = std::chrono::steady_clock::now();
+    struct Acc {
+        std::chrono::steady_clock::time_point t;
+        ~Acc() {
+            g_eigen_voxel_ms += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t).count();
+            ++g_eigen_voxel_cnt;
+        }
+    } acc{t_eig0};
+
     const int N = static_cast<int>(pts.size());
     if (N < 3) return false;
 
@@ -135,7 +151,8 @@ PCAResult computePillarPCA(const PillarData &pillar)
 //  Normal 일관성
 // ─────────────────────────────────────────────────────────────────────────
 NormalConsistency computeNormalConsistency(const PillarData &pillar,
-                                            int use_weight, double n_ref)
+                                            int use_weight, double n_ref,
+                                            bool valid_only)
 {
     NormalConsistency nc;
     const int num_voxels = static_cast<int>(pillar.voxels.size());
@@ -166,6 +183,20 @@ NormalConsistency computeNormalConsistency(const PillarData &pillar,
     for (const auto &vn : vnormals) n_bar += vn.w * vn.n;
     if (n_bar.norm() < 1e-10) return nc;
     n_bar.normalize();
+
+    // valid_only: 분류를 쓰지 않으면 classifyPillar가 nc.valid만 본다.
+    // θv/μ_θ/σ_θ와 theta_v/theta_valid는 voxel corner 분기에서만 읽히는데
+    // 그 분기를 건너뛰므로, pillar당 벡터 할당 4회와 voxel당 acos + 분산 2차
+    // 순회를 생략한다. sum_w 가드는 전체 경로와 동일하게 유지해 valid 판정이
+    // 달라지지 않게 한다.
+    if (valid_only)
+    {
+        double sum_w = 0.0;
+        for (const auto &vn : vnormals) sum_w += vn.w;
+        if (sum_w <= 1e-12) return nc;
+        nc.valid = true;
+        return nc;
+    }
 
     // theta_v/theta_valid: 모든 voxel에 대해 크기 고정
     // → nc.theta_v.size() == pillar.voxels.size() 항상 보장
@@ -210,6 +241,10 @@ Label classifyPillar(const PCAResult &pca, const NormalConsistency &nc,
     if (!pca.valid) return Label::SKIP;
     if (pca.S >= params.s_thresh) return Label::DYNAMIC;
     if (!nc.valid) return Label::DYNAMIC;
+    // 동적 판정은 위에서 끝났다. 분류를 쓰지 않으면 μ_θ/σ_θ가 계산되지 않았으므로
+    // (기본값 999.0) 비교하지 않고 PLANAR로 반환한다. PLANAR/CORNER 둘 다
+    // 생존하므로 출력 점 집합에는 영향이 없다.
+    if (!params.use_feature_classification) return Label::PLANAR;
     if (nc.mu_theta <= params.mu_thresh &&
         nc.sigma_theta <= params.sigma_thresh)
         return Label::PLANAR;
@@ -253,8 +288,17 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
     int &out_fill_dynamic_count,
     int &out_voxel_corner_count,
     int &out_wall_pillar_count,
-    int &out_corner_ds_removed)
+    int &out_corner_ds_removed,
+    ClassifyTiming *timing)
 {
+    using ProfClock = std::chrono::steady_clock;
+    using ProfMs = std::chrono::duration<double, std::milli>;
+    double prof_math_ms = 0.0;
+    double prof_emit_ms = 0.0;
+    double prof_phi_ms = 0.0;
+    long prof_pillars = 0;
+    g_eigen_voxel_ms = 0.0;
+    g_eigen_voxel_cnt = 0;
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr output(
         new pcl::PointCloud<pcl::PointXYZRGB>());
     (void)floor_z_ref;  // height filter는 local neighbor median 기준을 사용한다.
@@ -289,6 +333,7 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
         int ds_removed;
     };
 
+    // ── 병합 대상 (병렬 영역 바깥) ────────────────────────────────────────
     std::vector<EmittedPoint> emitted_points;
     if (needs_post_filter)
         emitted_points.reserve(total_input_points);
@@ -297,6 +342,67 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
         survived_map.reserve(pillar_map.size());
     std::unordered_map<PillarKey, std::unordered_set<int64_t>, PillarKeyHash>
         height_filter_voxel_keys;
+
+    // 루프 이후 2-pass 필터에서도 쓰이므로 병렬 영역 밖에 둔다. 순수 함수다.
+    auto meanZOfVoxel = [](const VoxelPoints *vox) -> double {
+        if (!vox || vox->points.empty()) return 0.0;
+        double sum_z = 0.0;
+        for (const auto &pt : vox->points)
+            sum_z += static_cast<double>(pt.z());
+        return sum_z / static_cast<double>(vox->points.size());
+    };
+
+    // ── OpenMP를 이용한 병렬 실행 준비 ───────────────────────────────────────
+    // pillar는 서로 독립이다. voxel은 (i,j,k), pillar는 (i,j)라 한 voxel이
+    // 정확히 한 pillar에만 속하므로, VoxelPoints의 mutable PCA 캐시를 두
+    // 스레드가 동시에 건드릴 일이 없다.
+    // omp for는 random access가 필요해서 map을 벡터로 평탄화한다.
+    std::vector<const std::pair<const PillarKey, PillarData> *> pillar_list;
+    pillar_list.reserve(pillar_map.size());
+    for (const auto &kv : pillar_map)
+        pillar_list.push_back(&kv);
+
+    // 병렬 영역 안에서는 같은 이름의 지역 변수가 아래 변수들을 가리므로
+    // (shadowing) 병합할 때는 포인터로 접근한다. 이 덕분에 루프 본문은
+    // 한 줄도 바뀌지 않는다.
+    auto *g_output   = &output;
+    auto *g_emitted  = &emitted_points;
+    auto *g_survived = &survived_map;
+    auto *g_hfvk     = &height_filter_voxel_keys;
+    int *g_planar = &out_planar_count,   *g_corner = &out_corner_count;
+    int *g_voxdyn = &out_voxel_dynamic_count, *g_pmin = &out_pillar_min_count;
+    int *g_pdyn = &out_pillar_dynamic_count,  *g_span = &out_span_dynamic_count;
+    int *g_fill = &out_fill_dynamic_count,    *g_vcorner = &out_voxel_corner_count;
+    int *g_wall = &out_wall_pillar_count,     *g_cds = &out_corner_ds_removed;
+    double g_math_ms = 0.0, g_emit_ms = 0.0, g_phi_ms = 0.0;
+    double g_eig_ms = 0.0;
+    long g_pillars = 0, g_eig_cnt = 0;
+
+    const int classify_threads = std::max(1, params.classify_num_threads);
+    const size_t reserve_per_thread =
+        total_input_points / static_cast<size_t>(classify_threads) + 1;
+
+    #pragma omp parallel num_threads(classify_threads)
+    {
+    // ── 스레드별 상태 (바깥 변수를 같은 이름으로 가림) ────────────────
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr output(
+        new pcl::PointCloud<pcl::PointXYZRGB>());
+    output->points.reserve(reserve_per_thread);
+    std::vector<EmittedPoint> emitted_points;
+    if (needs_post_filter)
+        emitted_points.reserve(reserve_per_thread);
+    std::unordered_map<PillarKey, PillarData, PillarKeyHash> survived_map;
+    std::unordered_map<PillarKey, std::unordered_set<int64_t>, PillarKeyHash>
+        height_filter_voxel_keys;
+    int out_planar_count = 0, out_corner_count = 0, out_voxel_dynamic_count = 0;
+    int out_pillar_min_count = 0, out_pillar_dynamic_count = 0;
+    int out_span_dynamic_count = 0, out_fill_dynamic_count = 0;
+    int out_voxel_corner_count = 0, out_wall_pillar_count = 0;
+    int out_corner_ds_removed = 0;
+    double prof_math_ms = 0.0, prof_emit_ms = 0.0, prof_phi_ms = 0.0;
+    long prof_pillars = 0;
+    g_eigen_voxel_ms = 0.0;    // thread_local
+    g_eigen_voxel_cnt = 0;
 
     auto addEmittedPoint = [&](const PillarKey &key,
                                int64_t voxel_k,
@@ -344,14 +450,6 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
         survived_map[key] = pillar;
     };
 
-    auto meanZOfVoxel = [](const VoxelPoints *vox) -> double {
-        if (!vox || vox->points.empty()) return 0.0;
-        double sum_z = 0.0;
-        for (const auto &pt : vox->points)
-            sum_z += static_cast<double>(pt.z());
-        return sum_z / static_cast<double>(vox->points.size());
-    };
-
     // ── 공통 헬퍼: voxel 포인트를 PLANAR(흰색) 출력 후보로 저장 ───────────
     auto emitPlanarVoxel = [&](const PillarKey &key,
                                const VoxelPoints *vox,
@@ -381,10 +479,12 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
         return k_min;
     };
 
-    for (const auto &kv : pillar_map)
+    #pragma omp for schedule(dynamic, 32) nowait
+    for (size_t pillar_idx = 0; pillar_idx < pillar_list.size(); ++pillar_idx)
     {
+        const auto &kv = *pillar_list[pillar_idx];
         const PillarData &pillar_orig = kv.second;
- 
+
         // ── [1] Voxel PCA filter ─────────────────────────────────────────
         PillarData pillar_after_voxel;
         const PillarData *ptr = &pillar_orig;
@@ -464,6 +564,7 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
             if (fill_ratio > params.fill_ratio_thresh)
             {
                 // k_min & k_max 제외한 중간 voxel로 φ mean/std 계산
+                const auto t_phi0 = ProfClock::now();
                 struct PhiSample { double phi; double w; };
                 std::vector<PhiSample> phi_list;
                 phi_list.reserve(ptr->voxels.size());
@@ -503,6 +604,7 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
                     is_wall_phi = (phi_mean < params.phi_mean_thresh) &&
                                   (phi_std  < params.phi_std_thresh);
                 }
+                prof_phi_ms += ProfMs(ProfClock::now() - t_phi0).count();
  
                 if (is_wall_phi)
                 {
@@ -579,18 +681,42 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
         }
 
         // ── [4] PCA + Normal 일관성 + 분류 ───────────────────────────────
+        const auto t_math0 = ProfClock::now();
         PCAResult pca = computePillarPCA(*ptr);
 
         NormalConsistency nc;
         if (pca.valid && pca.S < params.s_thresh)
-            nc = computeNormalConsistency(*ptr, params.use_weight, params.n_ref);
+            nc = computeNormalConsistency(*ptr, params.use_weight, params.n_ref,
+                                          !params.use_feature_classification);
 
         Label lbl = classifyPillar(pca, nc, params);
+        prof_math_ms += ProfMs(ProfClock::now() - t_math0).count();
+        ++prof_pillars;
 
         if (lbl == Label::DYNAMIC || lbl == Label::SKIP)
         { out_pillar_dynamic_count += static_cast<int>(ptr->point_count); continue; }
 
         storeSurvivedPillar(kv.first, *ptr);
+
+        // ── 분류를 쓰지 않는 경우 여기서 종료 ────────────────────────────
+        // 동적 객체 제거는 위 [1]~[4]에서 이미 끝났다. 아래 색상 결정과
+        // voxel corner 탐색(theta 정렬/median)은 PLANAR/CORNER 라벨을 만들기
+        // 위한 것이고, scan-to-map 정합은 두 라벨을 다시 합쳐 쓰므로 불필요하다.
+        // use_corner_downsample=0이면 아래 분기도 결국 pillar의 모든 포인트를
+        // 그대로 출력하므로, 여기서 끊어도 출력 점 집합은 동일하다.
+        if (!params.use_feature_classification)
+        {
+            const auto t_emit0 = ProfClock::now();
+            for (const auto *vox : ptr->voxels)
+            {
+                if (!vox) continue;
+                for (const auto &pt : vox->points)
+                    addEmittedPoint(kv.first, vox->k_index, pt, 255, 255, 255,
+                                    EmitKind::PLANAR);
+            }
+            prof_emit_ms += ProfMs(ProfClock::now() - t_emit0).count();
+            continue;
+        }
 
         // ── 색상 결정 ─────────────────────────────────────────────────────
         uint8_t r=0, g=0, b=0;
@@ -684,7 +810,48 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
                                 lbl == Label::CORNER ? EmitKind::CORNER
                                                      : EmitKind::PLANAR);
         }
+    }   // omp for 끝
+
+    // ── 스레드별 결과 병합 ────────────────────────────────────────────
+    // 출력 포인트 순서는 스레드 스케줄에 따라 달라지지만, registration은
+    // 순서에 무관하다. 점 집합 자체는 직렬 실행과 동일하다.
+    #pragma omp critical
+    {
+        (*g_output)->insert((*g_output)->end(),
+                            output->begin(), output->end());
+        if (needs_post_filter)
+        {
+            g_emitted->insert(g_emitted->end(),
+                              emitted_points.begin(), emitted_points.end());
+            for (auto &e : survived_map)
+                (*g_survived)[e.first] = std::move(e.second);
+            for (auto &e : height_filter_voxel_keys)
+                (*g_hfvk)[e.first].insert(e.second.begin(), e.second.end());
+        }
+        *g_planar  += out_planar_count;
+        *g_corner  += out_corner_count;
+        *g_voxdyn  += out_voxel_dynamic_count;
+        *g_pmin    += out_pillar_min_count;
+        *g_pdyn    += out_pillar_dynamic_count;
+        *g_span    += out_span_dynamic_count;
+        *g_fill    += out_fill_dynamic_count;
+        *g_vcorner += out_voxel_corner_count;
+        *g_wall    += out_wall_pillar_count;
+        *g_cds     += out_corner_ds_removed;
+        g_math_ms  += prof_math_ms;
+        g_emit_ms  += prof_emit_ms;
+        g_phi_ms   += prof_phi_ms;
+        g_pillars  += prof_pillars;
+        g_eig_ms   += g_eigen_voxel_ms;    // thread_local, 스레드별 값
+        g_eig_cnt  += g_eigen_voxel_cnt;
     }
+    }   // omp parallel 끝
+
+    // 스레드별 누적값을 함수 스코프 변수로 되돌린다.
+    prof_math_ms = g_math_ms;
+    prof_emit_ms = g_emit_ms;
+    prof_phi_ms  = g_phi_ms;
+    prof_pillars = g_pillars;
 
     // 최종 특징 분류까지 살아남은 pillar를 대상으로 주변 pillar의 바닥면 높이 평균의 median과 비교
     // 단, 적용대상은 아래와 같음
@@ -798,5 +965,17 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
 
     output->width=static_cast<uint32_t>(output->points.size());
     output->height=1; output->is_dense=true;
+
+    if (timing)
+    {
+        timing->pillar_math_ms = prof_math_ms;
+        timing->emit_ms = prof_emit_ms;
+        timing->phi_ms = prof_phi_ms;
+        // 병렬 실행 시 스레드별 시간의 합이라 벽시계 시간보다 크다.
+        // 스레드 수로 나누면 대략의 벽시계 기여분이 된다.
+        timing->voxel_pca_ms = g_eig_ms;
+        timing->voxel_pca_cnt = g_eig_cnt;
+        timing->pillars_seen = prof_pillars;
+    }
     return output;
 }

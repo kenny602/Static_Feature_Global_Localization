@@ -35,23 +35,29 @@
 class OnlineStaticFeatureNode
 {
 public:
+    // 초기화 관련 함수
     OnlineStaticFeatureNode()
-        : nh_(),
-          pnh_("~"),
+        : nh_(),        // NodeHandle
+          pnh_("~"),    // private NodeHandle
           cloud_sub_(),
           pose_sub_(),
           sync_(SyncPolicy(20), cloud_sub_, pose_sub_)
     {
-        loadRosParams();
-        configureLocalOrigin();
-        initLatencyLog();
+        loadRosParams();         // ROS 파라미터 읽기
+        configureLocalOrigin();  // local origin 설정
+        initLatencyLog();        // latency CSV chrlghk
 
-        cloud_sub_.subscribe(nh_, cloud_topic_, 1);
-        pose_sub_.subscribe(nh_, pose_topic_, 10);
+        // 입력 2개(cloud / pose)의 subscriber 각각 연결
+        cloud_sub_.subscribe(nh_, cloud_topic_, 1); // cloud_topic : /scan_matching_accumulator_node/dense_window_cloud
+        pose_sub_.subscribe(nh_, pose_topic_, 10);  // pose_topic  : /scan_matching_accumulator_node/scan_matching_pose
+        
+        // ApproximateTime synchronizer 설정
         sync_.setMaxIntervalDuration(ros::Duration(sync_slop_sec_));
+        // cloud와 pose쌍을 찾아 하나의 콜백으로 전달하여 싱크 맞춰주기
         sync_.registerCallback(boost::bind(
-            &OnlineStaticFeatureNode::scanPoseCallback, this, _1, _2));
-
+            &OnlineStaticFeatureNode::scanPoseCallback, this, _1, _2)); // _1 : cloud, _2 : pose
+        
+        // 출력 publisher 생성
         accumulated_pub_ = pnh_.advertise<sensor_msgs::PointCloud2>(
             accumulated_topic_, 1, false);
         colored_feature_pub_ = pnh_.advertise<sensor_msgs::PointCloud2>(
@@ -60,6 +66,8 @@ public:
             plane_feature_topic_, 1, false);
         corner_feature_pub_ = pnh_.advertise<sensor_msgs::PointCloud2>(
             corner_feature_topic_, 1, false);
+        static_feature_pub_ = pnh_.advertise<sensor_msgs::PointCloud2>(
+            static_feature_topic_, 1, false);
         feature_history_pub_ = pnh_.advertise<sensor_msgs::PointCloud2>(
             feature_history_topic_, 1, true);
 
@@ -70,7 +78,7 @@ public:
                         << ", local_origin_mode=" << local_origin_mode_);
     }
 
-    ~OnlineStaticFeatureNode()
+    ~OnlineStaticFeatureNode() // 노드 종료 시 누적된 static feature map 저장
     {
         if (save_on_shutdown_pcd_)
             saveFeatureHistoryPcd("shutdown");
@@ -79,14 +87,26 @@ public:
 private:
     using CloudMsg = sensor_msgs::PointCloud2;
     using PoseMsg = geometry_msgs::PoseStamped;
-    using SyncPolicy = message_filters::sync_policies::ApproximateTime<CloudMsg, PoseMsg>;
+    using SyncPolicy = message_filters::sync_policies::ApproximateTime<CloudMsg, PoseMsg>; // cloud와 pose를 동기화
     using SteadyClock = std::chrono::steady_clock;
     using TimePoint = SteadyClock::time_point;
 
+    // 특징 추출 단계의 시간과 통계를 보관
     struct FeatureTiming
     {
-        double build_voxel_pillar_ms = 0.0;
+        double build_voxel_pillar_ms = 0.0; // voxel map 생성 시간
+        // build_voxel_pillar 하위 분해 (병목 분석용)
+        double bvp_step1_assign_ms = 0.0;   // 포인트 → voxel 해시 삽입
+        double bvp_step1_merge_ms = 0.0;    // shard → 단일 map splice (직렬이면 0)
+        double bvp_step2_pillar_ms = 0.0;   // voxel → pillar 연결
         double classify_pillars_ms = 0.0;
+        // classify_pillars 하위 분해. 둘의 합과 classify_pillars_ms의 차이가
+        // 필터([1]~[3])와 unordered_map 순회 비용이다.
+        double cls_pillar_math_ms = 0.0;    // computePillarPCA + NormalConsistency
+        double cls_emit_ms = 0.0;           // 출력 클라우드 적재
+        double cls_voxel_pca_ms = 0.0;      // eigenDecompose 총합 (voxel PCA)
+        double cls_phi_ms = 0.0;            // Stage 3 φ 통계
+        long   cls_voxel_pca_cnt = 0;       // eigenDecompose 호출 횟수
         double split_features_ms = 0.0;
         double publish_features_ms = 0.0;
         double total_ms = 0.0;
@@ -110,6 +130,7 @@ private:
         int corner_ds_removed = 0;
     };
 
+    // callback 전체에 대한 시간과 포인트 수를 보관
     struct LatencyRecord
     {
         int callback_index = 0;
@@ -146,6 +167,8 @@ private:
     std::string colored_feature_topic_ = "static_features_colored";
     std::string plane_feature_topic_ = "scan_plane_features";
     std::string corner_feature_topic_ = "scan_corner_features";
+    // use_feature_classification=0일 때 쓰는 단일 정적 포인트 토픽
+    std::string static_feature_topic_ = "scan_static_features";
     std::string feature_history_topic_ = "feature_map_colored";
     std::string local_origin_mode_ = "none";
     std::string origin_las_path_;
@@ -181,14 +204,15 @@ private:
     ros::Publisher colored_feature_pub_;
     ros::Publisher plane_feature_pub_;
     ros::Publisher corner_feature_pub_;
+    ros::Publisher static_feature_pub_;
     ros::Publisher feature_history_pub_;
 
-    std::deque<pcl::PointCloud<pcl::PointXYZ>::Ptr> frame_buffer_;
+    std::deque<pcl::PointCloud<pcl::PointXYZ>::Ptr> frame_buffer_; // 최근 cloud들을 저장하는 sliding window
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr feature_history_{
         new pcl::PointCloud<pcl::PointXYZRGB>()};
     std::ofstream latency_log_;
 
-    void loadRosParams()
+    void loadRosParams() // ROS 파라미터 읽어오기
     {
         pnh_.param<std::string>("cloud_topic", cloud_topic_, cloud_topic_);
         pnh_.param<std::string>("pose_topic", pose_topic_, pose_topic_);
@@ -197,6 +221,7 @@ private:
         pnh_.param<std::string>("colored_feature_topic", colored_feature_topic_, colored_feature_topic_);
         pnh_.param<std::string>("plane_feature_topic", plane_feature_topic_, plane_feature_topic_);
         pnh_.param<std::string>("corner_feature_topic", corner_feature_topic_, corner_feature_topic_);
+        pnh_.param<std::string>("static_feature_topic", static_feature_topic_, static_feature_topic_);
         pnh_.param<std::string>("feature_history_topic", feature_history_topic_, feature_history_topic_);
         pnh_.param<std::string>("local_origin_mode", local_origin_mode_, local_origin_mode_);
         pnh_.param<std::string>("origin_las_path", origin_las_path_, origin_las_path_);
@@ -249,6 +274,7 @@ private:
         params_.use_voxel_corner = 1;
         params_.corner_multiplier = 5.0;
         params_.use_corner_downsample = 0;
+        params_.use_feature_classification = 1;
 
         pnh_.param("use_downsample", params_.use_downsample, params_.use_downsample);
         pnh_.param("downsample_size", params_.downsample_size, params_.downsample_size);
@@ -281,9 +307,17 @@ private:
         pnh_.param("use_voxel_corner", params_.use_voxel_corner, params_.use_voxel_corner);
         pnh_.param("corner_multiplier", params_.corner_multiplier, params_.corner_multiplier);
         pnh_.param("use_corner_downsample", params_.use_corner_downsample, params_.use_corner_downsample);
+        pnh_.param("use_feature_classification", params_.use_feature_classification,
+                   params_.use_feature_classification);
+        pnh_.param("classify_num_threads", params_.classify_num_threads,
+                   params_.classify_num_threads);
+        pnh_.param("voxel_num_threads", params_.voxel_num_threads,
+                   params_.voxel_num_threads);
     }
 
     template <typename T>
+    // 좌표 원점 관련 함수 - las 파일 헤더와 첫번째 포인트 좌표를 읽을 때 사용
+    // 바이너리 파일의 특정 byte offset에서 원하는 타입을 읽는 템플릿 함수임
     bool readBinaryAt(std::ifstream &file, std::streamoff offset, T &value) const
     {
         file.seekg(offset, std::ios::beg);
@@ -293,6 +327,7 @@ private:
         return file.good();
     }
 
+    // LAS 파일을 직접 열어 여러 정보들을 읽어오는 함수
     bool readLasFirstPointOrigin(const std::string &path,
                                  Eigen::Vector3f &origin) const
     {
@@ -305,16 +340,17 @@ private:
         if (!file.good() || std::strncmp(signature, "LASF", 4) != 0)
             return false;
 
+        // 데이터 읽어오기
         uint32_t point_data_offset = 0;
         uint16_t point_record_length = 0;
         double x_scale = 0.0, y_scale = 0.0, z_scale = 0.0;
         double x_offset = 0.0, y_offset = 0.0, z_offset = 0.0;
-        if (!readBinaryAt(file, 96, point_data_offset) ||
-            !readBinaryAt(file, 105, point_record_length) ||
-            !readBinaryAt(file, 131, x_scale) ||
+        if (!readBinaryAt(file, 96, point_data_offset) ||       // point data 시작 위치
+            !readBinaryAt(file, 105, point_record_length) ||    // point record 길이
+            !readBinaryAt(file, 131, x_scale) ||                // x, y, z scale
             !readBinaryAt(file, 139, y_scale) ||
             !readBinaryAt(file, 147, z_scale) ||
-            !readBinaryAt(file, 155, x_offset) ||
+            !readBinaryAt(file, 155, x_offset) ||               // x, y, z offset
             !readBinaryAt(file, 163, y_offset) ||
             !readBinaryAt(file, 171, z_offset))
         {
@@ -332,6 +368,7 @@ private:
             return false;
         }
 
+        // 포인트의 실제 좌표 복원
         origin = Eigen::Vector3f(
             static_cast<float>(raw_x * x_scale + x_offset),
             static_cast<float>(raw_y * y_scale + y_offset),
@@ -339,12 +376,14 @@ private:
         return true;
     }
 
+    // LAS - 지원하는 원점 모드 3가지
     void configureLocalOrigin()
     {
         std::string mode = local_origin_mode_;
         std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
         local_origin_mode_ = mode;
 
+        // none: 좌표값 그대로 사용
         if (mode == "none")
         {
             subtract_local_origin_ = false;
@@ -352,6 +391,7 @@ private:
             return;
         }
 
+        // manual: 파라미터로 받은 (x, y, z)를 빼줌
         if (mode == "manual")
         {
             subtract_local_origin_ = true;
@@ -360,6 +400,8 @@ private:
                 static_cast<float>(local_origin_y_),
                 static_cast<float>(local_origin_z_));
         }
+
+        // LAS 파일의 첫번째 포인트가 원점이 되도록 함
         else if (mode == "las_first")
         {
             if (origin_las_path_.empty())
@@ -382,11 +424,13 @@ private:
                         << local_origin_.z() << "]");
     }
 
+    // 두 시점 차이를 밀리 초(ms)로 변환 - 로그 기록용
     static double elapsedMs(const TimePoint &start, const TimePoint &end)
     {
         return std::chrono::duration<double, std::milli>(end - start).count();
     }
 
+    // 상위 디렉토리를 만들고 CSV 파일을 연 뒤 헤더를 기록
     void initLatencyLog()
     {
         if (!latency_log_enabled_)
@@ -416,7 +460,10 @@ private:
             << "voxel_corner_points,wall_pillar_count,corner_ds_removed,"
             << "ros_to_pcl_ms,transform_ms,buffer_ms,accumulate_ms,"
             << "floor_align_ms,ceiling_crop_ms,downsample_ms,publish_accumulated_ms,"
-            << "build_voxel_pillar_ms,classify_pillars_ms,split_features_ms,"
+            << "build_voxel_pillar_ms,bvp_step1_assign_ms,bvp_step1_merge_ms,"
+            << "bvp_step2_pillar_ms,"
+            << "classify_pillars_ms,cls_pillar_math_ms,cls_emit_ms,"
+            << "cls_voxel_pca_ms,cls_voxel_pca_cnt,cls_phi_ms,split_features_ms,"
             << "publish_features_ms,feature_total_ms,"
             << "window_algorithm_ms,window_total_ms\n";
         latency_log_.flush();
@@ -424,6 +471,7 @@ private:
         ROS_INFO_STREAM("[online_static_feature] latency log: " << latency_log_path_);
     }
 
+    // LatencyRecord와 그 안의 FeatureTiming을 하나의 행으로 저장함
     void writeLatencyLog(const LatencyRecord &r)
     {
         if (!latency_log_enabled_ || !latency_log_.is_open())
@@ -463,7 +511,15 @@ private:
             << r.downsample_ms << ','
             << r.publish_accumulated_ms << ','
             << r.feature.build_voxel_pillar_ms << ','
+            << r.feature.bvp_step1_assign_ms << ','
+            << r.feature.bvp_step1_merge_ms << ','
+            << r.feature.bvp_step2_pillar_ms << ','
             << r.feature.classify_pillars_ms << ','
+            << r.feature.cls_pillar_math_ms << ','
+            << r.feature.cls_emit_ms << ','
+            << r.feature.cls_voxel_pca_ms << ','
+            << r.feature.cls_voxel_pca_cnt << ','
+            << r.feature.cls_phi_ms << ','
             << r.feature.split_features_ms << ','
             << r.feature.publish_features_ms << ','
             << r.feature.total_ms << ','
@@ -472,6 +528,8 @@ private:
         latency_log_.flush();
     }
 
+    // 핵심 콜백 함수
+    // 입력 : dense_window_cloud (=accumulator에서 발행한 PointXYZI cloud), odom 좌표계임
     void scanPoseCallback(const CloudMsg::ConstPtr &cloud_msg,
                           const PoseMsg::ConstPtr &pose_msg)
     {
@@ -484,6 +542,7 @@ private:
         latency.msg_stamp_sec = cloud_msg->header.stamp.toSec();
         latency.log_stamp_sec = ros::Time::now().toSec();
 
+        // 1. ROS cloud를 PCL로 변환
         pcl::PointCloud<pcl::PointXYZI>::Ptr input_xyzi(new pcl::PointCloud<pcl::PointXYZI>());
         pcl::fromROSMsg(*cloud_msg, *input_xyzi);
         TimePoint stage_end = SteadyClock::now();
@@ -496,6 +555,7 @@ private:
             return;
         }
 
+        // 2. 출력되는 map_cloud 좌표계(동일하게 odom)의 PointXYZ cloud 생성 - Intensity는 이후 사용하지 않으므로 제거함
         stage_start = SteadyClock::now();
         pcl::PointCloud<pcl::PointXYZ>::Ptr map_cloud(new pcl::PointCloud<pcl::PointXYZ>());
         map_cloud->reserve(input_xyzi->size());
@@ -510,7 +570,7 @@ private:
             if (transform_with_pose_)
                 p = T_map_lidar * p;
             if (subtract_local_origin_)
-                p -= local_origin_;
+                p -= local_origin_; // 원점 기준 정렬
 
             pcl::PointXYZ out;
             out.x = p.x();
@@ -526,13 +586,16 @@ private:
         latency.transform_ms = elapsedMs(stage_start, stage_end);
         latency.map_points = map_cloud->size();
 
+        // 3. online sliding window 갱신
         stage_start = SteadyClock::now();
         frame_buffer_.push_back(map_cloud);
-        while (static_cast<int>(frame_buffer_.size()) > window_frames_)
+        while (static_cast<int>(frame_buffer_.size()) > window_frames_) // 최근 window_frames 개의 입력 frame만 유지
             frame_buffer_.pop_front();
         stage_end = SteadyClock::now();
         latency.buffer_ms = elapsedMs(stage_start, stage_end);
 
+        // 4. 처리 주기 확인
+        // 값이 3이면 cloud는 계속 buffer에 들어가지만, 특징 추출은 3 callback마다 한번 수행
         if (callback_count_ % publish_every_n_frames_ != 0)
             return;
 
@@ -540,12 +603,15 @@ private:
         latency.window_index = processed_window_count_;
         latency.window_size = static_cast<int>(frame_buffer_.size());
 
+        // 5. 버퍼 내 모든 포인트를 하나의 cloud로 합쳐줌
+        // 이미 각 입력 포인트 cloud는 동일한 odom 좌표계에 있으므로, pose 변환 불필요
         stage_start = SteadyClock::now();
         pcl::PointCloud<pcl::PointXYZ>::Ptr accumulated = makeAccumulatedCloud();
         stage_end = SteadyClock::now();
         latency.accumulate_ms = elapsedMs(stage_start, stage_end);
 
-        if (params_.use_floor_align)
+        // 6. yaml 옵션에 따른 전처리
+        if (params_.use_floor_align) // 바닥 정렬
         {
             stage_start = SteadyClock::now();
             Eigen::Matrix3f floor_R = Eigen::Matrix3f::Identity();
@@ -554,14 +620,14 @@ private:
             stage_end = SteadyClock::now();
             latency.floor_align_ms = elapsedMs(stage_start, stage_end);
         }
-        if (params_.simulate_no_ceiling)
+        if (params_.simulate_no_ceiling) // 천장 제거 시뮬레이션
         {
             stage_start = SteadyClock::now();
             accumulated = cropPointsAboveZ(accumulated, params_.ceiling_cut_percentile);
             stage_end = SteadyClock::now();
             latency.ceiling_crop_ms = elapsedMs(stage_start, stage_end);
         }
-        if (params_.use_downsample)
+        if (params_.use_downsample) // VoxelGrid 다운샘플링
         {
             stage_start = SteadyClock::now();
             accumulated = downsampleCloud(accumulated);
@@ -569,12 +635,16 @@ private:
             latency.downsample_ms = elapsedMs(stage_start, stage_end);
         }
 
+        // 7. 전처리된 acuumulated cloud 발행
         latency.accumulated_points = accumulated->size();
         stage_start = SteadyClock::now();
+        // 포인트 발행
+        // dense_window_cloud를 입력으로 받아서, 선택적 전처리를 적용한 accumulated_cloud로 발행함
         publishXYZCloud(accumulated, accumulated_pub_, cloud_msg->header.stamp);
         stage_end = SteadyClock::now();
         latency.publish_accumulated_ms = elapsedMs(stage_start, stage_end);
 
+        // 8. 특징점 추출
         extractAndPublishFeatures(accumulated, cloud_msg->header.stamp, latency.feature);
 
         latency.window_algorithm_ms =
@@ -645,6 +715,7 @@ private:
         return ds;
     }
 
+    // 정적 특징 추출 함수
     void extractAndPublishFeatures(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
                                    const ros::Time &stamp,
                                    FeatureTiming &timing)
@@ -655,9 +726,16 @@ private:
         std::unordered_map<VoxelKey, VoxelPoints, VoxelKeyHash> voxel_map;
         std::unordered_map<PillarKey, PillarData, PillarKeyHash> pillar_map;
         int voxel_min_removed = 0;
-        buildVoxelAndPillarMap(cloud, params_, voxel_map, pillar_map, voxel_min_removed);
+
+        // 1. Voxel map & pillar map 생성 - 실구현: voxel_map.cpp 참조
+        BuildTiming build_timing;
+        buildVoxelAndPillarMap(cloud, params_, voxel_map, pillar_map, voxel_min_removed,
+                               &build_timing);
         TimePoint stage_end = SteadyClock::now();
         timing.build_voxel_pillar_ms = elapsedMs(stage_start, stage_end);
+        timing.bvp_step1_assign_ms = build_timing.step1_assign_ms;
+        timing.bvp_step1_merge_ms = build_timing.step1_merge_ms;
+        timing.bvp_step2_pillar_ms = build_timing.step2_pillar_ms;
         timing.voxel_count = voxel_map.size();
         timing.pillar_count = pillar_map.size();
         timing.voxel_min_removed = voxel_min_removed;
@@ -673,7 +751,9 @@ private:
         int wall_pillar_cnt = 0;
         int corner_ds_removed = 0;
 
+        ClassifyTiming classify_timing;
         stage_start = SteadyClock::now();
+        // 2. 모든 pillar를 분류 - pillar_pca.cpp 참조
         pcl::PointCloud<pcl::PointXYZRGB>::Ptr colored = classifyAllPillars(
             pillar_map,
             params_,
@@ -687,9 +767,15 @@ private:
             fill_dyn_cnt,
             voxel_corner_cnt,
             wall_pillar_cnt,
-            corner_ds_removed);
+            corner_ds_removed,
+            &classify_timing);
         stage_end = SteadyClock::now();
         timing.classify_pillars_ms = elapsedMs(stage_start, stage_end);
+        timing.cls_pillar_math_ms = classify_timing.pillar_math_ms;
+        timing.cls_emit_ms = classify_timing.emit_ms;
+        timing.cls_voxel_pca_ms = classify_timing.voxel_pca_ms;
+        timing.cls_phi_ms = classify_timing.phi_ms;
+        timing.cls_voxel_pca_cnt = classify_timing.voxel_pca_cnt;
         timing.feature_points = colored->size();
         timing.planar_count = planar_cnt;
         timing.corner_count = corner_cnt;
@@ -705,21 +791,41 @@ private:
         stage_start = SteadyClock::now();
         pcl::PointCloud<pcl::PointXYZ>::Ptr planes(new pcl::PointCloud<pcl::PointXYZ>());
         pcl::PointCloud<pcl::PointXYZ>::Ptr corners(new pcl::PointCloud<pcl::PointXYZ>());
-        planes->reserve(static_cast<size_t>(planar_cnt));
-        corners->reserve(static_cast<size_t>(corner_cnt));
 
-        for (const auto &pt : colored->points)
+        // 3. RGB cloud를 plane / corner로 특징점 라벨 분리
+        // plane : 흰색 / corner : 파랑 or 빨강
+        if (params_.use_feature_classification)
         {
-            pcl::PointXYZ out;
-            out.x = pt.x;
-            out.y = pt.y;
-            out.z = pt.z;
+            planes->reserve(static_cast<size_t>(planar_cnt));
+            corners->reserve(static_cast<size_t>(corner_cnt));
 
-            const bool is_planar = (pt.r > 200 && pt.g > 200 && pt.b > 200);
-            if (is_planar)
+            for (const auto &pt : colored->points)
+            {
+                pcl::PointXYZ out;
+                out.x = pt.x;
+                out.y = pt.y;
+                out.z = pt.z;
+
+                const bool is_planar = (pt.r > 200 && pt.g > 200 && pt.b > 200);
+                if (is_planar)
+                    planes->push_back(out);
+                else
+                    corners->push_back(out);
+            }
+        }
+        else
+        {
+            // 분류를 쓰지 않으므로 색 기준 분리 없이 그대로 옮긴다.
+            // corners는 비워 두고 planes만 단일 토픽으로 발행한다.
+            planes->reserve(colored->size());
+            for (const auto &pt : colored->points)
+            {
+                pcl::PointXYZ out;
+                out.x = pt.x;
+                out.y = pt.y;
+                out.z = pt.z;
                 planes->push_back(out);
-            else
-                corners->push_back(out);
+            }
         }
 
         planes->width = static_cast<uint32_t>(planes->size());
@@ -734,9 +840,17 @@ private:
         timing.corner_points = corners->size();
 
         stage_start = SteadyClock::now();
-        publishXYZRGBCloud(colored, colored_feature_pub_, stamp);
-        publishXYZCloud(planes, plane_feature_pub_, stamp);
-        publishXYZCloud(corners, corner_feature_pub_, stamp);
+        if (params_.use_feature_classification)
+        {
+            publishXYZRGBCloud(colored, colored_feature_pub_, stamp); // 발행 토픽 : static_features_colored
+            publishXYZCloud(planes, plane_feature_pub_, stamp);       // 빌헹 토픽 : scan_plane_features
+            publishXYZCloud(corners, corner_feature_pub_, stamp);     // 발행 토픽 : scan_corner_features
+        }
+        else
+        {
+            // colored(XYZRGB)와 plane/corner 분리 발행을 건너뛴다.
+            publishXYZCloud(planes, static_feature_pub_, stamp);      // 발행 토픽 : scan_static_features
+        }
         stage_end = SteadyClock::now();
         timing.publish_features_ms = elapsedMs(stage_start, stage_end);
         timing.total_ms = elapsedMs(feature_start, stage_end);
@@ -795,6 +909,7 @@ private:
         return true;
     }
 
+    // 각 window에서 추출한 colored feature를 누적함 -> 종료 시 static feature PCD 저장을 위함
     void updateFeatureHistory(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &colored,
                               const ros::Time &stamp)
     {
@@ -821,6 +936,7 @@ private:
             publishXYZRGBCloud(feature_history_, feature_history_pub_, stamp);
     }
 
+    // 종료 시 누적된 feature_history_를 binary PCD로 저장
     bool saveFeatureHistoryPcd(const std::string &reason)
     {
         if (!feature_history_ || feature_history_->empty())
@@ -848,6 +964,7 @@ private:
         return false;
     }
 
+    // PointXYZ cloud를 PointCloud2로 변환
     void publishXYZCloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
                          const ros::Publisher &pub,
                          const ros::Time &stamp) const
@@ -861,6 +978,7 @@ private:
         pub.publish(msg);
     }
 
+    // PointXYZRGB cloud를 PointCloud2로 변환
     void publishXYZRGBCloud(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &cloud,
                             const ros::Publisher &pub,
                             const ros::Time &stamp) const

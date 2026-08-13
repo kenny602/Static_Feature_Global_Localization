@@ -245,6 +245,30 @@ struct ClassifyParams
     // 1 = 사용 (voxel당 centroid 1점 출력)
     int    use_corner_downsample = 0;
 
+    // --- PLANAR/CORNER 분류 사용 여부 ---
+    // 0 = 동적 객체 필터링(classifyPillar의 DYNAMIC/SKIP 판정)까지만 수행하고,
+    //     생존 pillar의 포인트를 분류 없이 그대로 출력한다. voxel corner 탐색과
+    //     PLANAR/CORNER 색 결정을 건너뛰므로 그만큼 연산이 줄어든다.
+    //     use_corner_downsample=0 기준으로 출력 점 집합은 1일 때와 동일하다.
+    // 1 = 기존 동작 (PLANAR/CORNER 분류 + voxel corner 탐색)
+    // 클래스 라벨을 쓰는 registration은 future work이므로, scan-to-map 정합만
+    // 하는 현재 단계에서는 0으로 두어 불필요한 연산을 피할 수 있다.
+    int    use_feature_classification = 1;
+
+    // --- classifyAllPillars OpenMP 스레드 수 ---
+    // pillar는 서로 독립이라 병렬 실행이 안전하다.
+    // 같은 머신에서 accumulator(num_threads)와 map_localizer(sg_num_threads)가
+    // 동시에 도므로 코어 수를 다 쓰면 경합한다. 1이면 직렬 실행.
+    int    classify_num_threads = 4;
+
+    // --- buildVoxelAndPillarMap Step1 OpenMP 스레드 수 ---
+    // unordered_map은 동시 삽입이 불가능하므로, 스레드별로 map을 따로 두고
+    // hash(key) % T == tid 인 키만 담당한다. 키가 겹치지 않아 병합 시
+    // 충돌이 없고, node handle splice로 옮겨서 VoxelPoints 주소를 보존한다
+    // (PillarData.voxels가 그 주소를 가리키므로 반드시 유지되어야 한다).
+    // 1이면 기존 단일 map 직렬 경로를 그대로 탄다.
+    int    voxel_num_threads = 1;
+
     // --- Planar(surface) feature voxel-filter 다운샘플 ---
     // scan/map matching에서 KD-Tree를 구성할 점 집합을 줄이기 위한 후처리
     // (LSMCL 수식 17 관점). corner는 손대지 않고 planar 점만 대상.

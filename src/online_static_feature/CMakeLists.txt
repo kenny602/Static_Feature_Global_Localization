@@ -48,6 +48,9 @@ add_executable(online_static_feature_node
 target_link_libraries(online_static_feature_node
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
+  # classifyAllPillars의 pillar 루프 병렬화에 필요.
+  # 이게 없으면 #pragma omp가 조용히 무시되어 직렬로 빌드된다.
+  $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
 )
 
 add_executable(scan_matching_accumulator_node
@@ -83,6 +86,8 @@ add_executable(pcd_window_feature_batch_node
 target_link_libraries(pcd_window_feature_batch_node
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
+  # pillar_pca.cpp를 공유하므로 동일하게 필요하다.
+  $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
 )
 
 install(TARGETS

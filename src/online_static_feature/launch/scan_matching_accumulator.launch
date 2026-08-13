@@ -1,7 +1,10 @@
 <launch>
   <arg name="input_topic" default="/ouster/points" />
   <arg name="odom_frame" default="odom" />
-  <arg name="window_frames" default="3" />
+  
+  <!-- 몇개 프레임을 쌓을 것인지 결정 -->
+  <arg name="window_frames" default="1" />
+  
   <arg name="submap_frames" default="1" />
   <arg name="publish_every_n_frames" default="1" />
   <arg name="registration_type" default="VGICP" />

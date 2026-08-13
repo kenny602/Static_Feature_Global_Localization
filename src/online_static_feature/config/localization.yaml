@@ -1,0 +1,119 @@
+# ===========================================================================
+# Localization 실험 파라미터.
+#
+# 최상위 키가 노드 이름이므로, launch에서 전역으로 load하면 각 노드의
+# private namespace(~)로 그대로 들어간다. 코드 변경 없음.
+#
+# 역할 분담:
+#   localization.yaml       - 파이프라인/실험 설정 (토픽, 프레임 수, matcher, 맵)
+#   gis_online_feature.yaml - feature 추출 알고리즘 튜닝 (voxel/pillar/임계값)
+#                             offline batch 노드와 공유하므로 여기서 건드리지 않는다.
+#
+# 실행마다 바뀌는 것(source_mode, matcher_type, output_dir)은 launch의 arg.
+# ===========================================================================
+
+# ── scan matching odometry ─────────────────────────────────────────────────
+# 세 조건(features / static / accumulated)에서 완전히 동일하게 동작한다.
+# 따라서 T_odom_lidar가 같고, map matching 입력만 달라지는 통제된 비교가 된다.
+scan_matching_accumulator_node:
+  input_topic: /ouster/points
+  odom_frame: odom
+
+  # raw 1프레임을 odom frame으로 발행. accumulated 조건의 소스가 바로 이것.
+  window_frames: 1
+  submap_frames: 1          # scan-to-scan (target = 직전 1프레임)
+  publish_every_n_frames: 1
+  publish_only_full_window: true
+  publish_submap: false
+
+  registration_type: VGICP
+  registration_leaf_size: 0.5   # 정합용 사본 축약. 원본은 보존된다.
+  dense_leaf_size: 0.0          # 0 = 발행 클라우드에 복셀 축약 없음
+  max_correspondence_distance: 2.0
+  voxel_resolution: 1.0
+  num_threads: 4
+
+  # 입력 crop. 여기서만 점이 실제로 버려진다.
+  min_range: 1.0
+  max_range: 120.0
+  z_min: -3.0
+  z_max: 8.0
+
+  latency_log_enabled: true
+
+# ── static feature 추출 ────────────────────────────────────────────────────
+# source_mode=accumulated일 때는 이 노드를 아예 기동하지 않는다.
+# 알고리즘 임계값은 gis_online_feature.yaml에서 온다.
+online_static_feature_node:
+  cloud_topic: /scan_matching_accumulator_node/dense_window_cloud
+  pose_topic: /scan_matching_accumulator_node/scan_matching_pose
+  map_frame: odom
+
+  # pillar 통계(n_voxel_min, n_ref, span filter)가 점 밀도를 가정하므로
+  # feature 조건에는 누적이 필요하다. raw 조건에는 해당 없음.
+  window_frames: 3
+  publish_every_n_frames: 1
+
+  # dense_window_cloud가 이미 odom frame이라 추가 변환 불필요
+  transform_with_pose: false
+
+  static_feature_topic: scan_static_features
+  sync_slop_sec: 0.05
+  latency_log_enabled: true
+
+  # classifyAllPillars의 pillar 루프 OpenMP 스레드 수. 1이면 직렬.
+  # 12코어인데 accumulator(num_threads=6)와 map_localizer(sg_num_threads=6)가
+  # 동시에 돌므로 다 쓰면 경합한다.
+  classify_num_threads: 4
+
+  # buildVoxelAndPillarMap Step1(포인트→voxel 해시 삽입) 스레드 수.
+  # 1 = 기존 단일 map 직렬 경로 (발산 시 여기로 즉시 복귀).
+  # 2 이상이면 스레드별 shard에 나눠 담고 node handle splice로 합친다.
+  # voxel build와 classify는 순차 실행이라 둘 다 4로 둬도 노드 피크는 4다.
+  voxel_num_threads: 1
+
+# ── scan-to-map localization ───────────────────────────────────────────────
+map_localizer:
+  # source_mode=accumulated(raw)면 raw 맵, features/static이면 feature 맵.
+  # map_pcd_path: /home/rain/data/ETRI_노은역/PCD_RESULT/raw_map.pcd
+  # map_pcd_path2: ""
+  # feature 맵을 쓸 때:
+  map_pcd_path:  /home/rain/offline_static_feature_ws/src/output_corner_define_pcd/ETRI_노은역/ETRI_20cm_v2_surface.pcd
+  map_pcd_path2: /home/rain/offline_static_feature_ws/src/output_corner_define_pcd/ETRI_노은역/ETRI_20cm_v2_corner.pcd
+
+  # source_mode별 입력 토픽
+  plane_feature_topic:  /online_static_feature_node/scan_plane_features
+  corner_feature_topic: /online_static_feature_node/scan_corner_features
+  static_feature_topic: /online_static_feature_node/scan_static_features
+  # accumulated: accumulator가 직접 발행하는 raw 클라우드.
+  # feature 노드를 거치지 않으므로 추출 비용이 전혀 들어가지 않는다.
+  # odom frame이며 accumulator의 range/z crop만 거친 상태다
+  # (dense_leaf_size=0.0이라 복셀 축약 없음). 단 정합 직전에 matcher가
+  # 다시 축약한다 - small_gicp는 sg_downsample_resolution, NDT는 축약 없음.
+  accumulated_topic: /scan_matching_accumulator_node/dense_window_cloud
+  odom_pose_topic:   /scan_matching_accumulator_node/scan_matching_pose
+
+  # LSMCL initialize를 대신하는 수동 초기 pose (map 좌표계, radian).
+  # offline map은 세션 시작 pose를 원점으로 생성되어 있으므로
+  # 같은 bag을 재생하는 self-localization에서는 전부 0.
+  # 다른 세션 bag이면 그 세션의 실제 시작 pose로 바꿔야 한다.
+  init_x: 0.0
+  init_y: 0.0
+  init_z: 0.0
+  init_yaw: 0.0
+
+  map_voxel_leaf: 0.25           # 맵 로드 직후 1회. matcher 종류와 무관. -> 0.2 이상을 써야 다운샘플링 됨
+  source_voxel_leaf: 0.0        # 0 = off (NDT 경로의 source 축약)
+  ndt_resolution: 1.0
+  sg_downsample_resolution: 0.25 # small_gicp preprocess_points (축약+KD-tree+공분산)
+  sg_voxel_resolution: 1.0      # VGICP GaussianVoxelMap 복셀 크기 [m]
+  sg_num_threads: 4
+  # correspondence 최대 거리 [m]. 코드 기본값은 1.0이지만 scan matching
+  # (scan_matching_accumulator의 max_correspondence_distance)과 동일하게 2.0을 쓴다.
+  # drift가 이 값을 넘으면 대응점을 못 찾아 회복이 불가능해진다.
+  sg_max_corr_dist: 2.0
+
+  # odometry 예측 대비 보정량 제한. 켜두면 정합 실패가 reject로 흡수되어
+  # 궤적은 멀쩡해 보인다. 실패율을 보려면 CSV의 rejected 열을 같이 봐야 한다.
+  max_correction_trans: 5.0
+  max_correction_rot_deg: 30.0

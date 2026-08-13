@@ -31,9 +31,18 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr rotateCloudXY(
     double theta_rad);
  
 // ── Voxel Map + Pillar Map 구성 ───────────────
+// 병목 분석용 하위 단계 시간. nullptr이면 계측하지 않는다.
+struct BuildTiming
+{
+    double step1_assign_ms = 0.0;  // 포인트 → voxel 해시 삽입 (병렬이면 shard 구성)
+    double step1_merge_ms  = 0.0;  // shard → 단일 map splice (직렬 경로면 0)
+    double step2_pillar_ms = 0.0;  // voxel → pillar 연결
+};
+
 void buildVoxelAndPillarMap(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
     const ClassifyParams &params,
     std::unordered_map<VoxelKey,  VoxelPoints, VoxelKeyHash>  &voxel_map,
     std::unordered_map<PillarKey, PillarData,  PillarKeyHash> &pillar_map,
-    int &out_voxel_min_removed);
+    int &out_voxel_min_removed,
+    BuildTiming *timing = nullptr);

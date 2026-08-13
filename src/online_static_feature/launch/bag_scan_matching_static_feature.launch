@@ -18,6 +18,8 @@
 
   <arg name="feature_window_frames" default="1" />
   <arg name="feature_publish_every_n_frames" default="1" />
+  <!-- 0 = PLANAR/CORNER 분류 생략, scan_static_features 단일 토픽 발행 -->
+  <arg name="use_feature_classification" default="1" />
   <arg name="publish_feature_history" default="false" />
   <arg name="save_on_shutdown_pcd" default="false" />
   <arg name="save_feature_history_path"
@@ -52,6 +54,7 @@
     <arg name="publish_every_n_frames" value="$(arg feature_publish_every_n_frames)" />
     <arg name="transform_with_pose" value="false" />
     <arg name="local_origin_mode" value="none" />
+    <arg name="use_feature_classification" value="$(arg use_feature_classification)" />
     <arg name="publish_feature_history" value="$(arg publish_feature_history)" />
     <arg name="save_on_shutdown_pcd" value="$(arg save_on_shutdown_pcd)" />
     <arg name="max_feature_history_points" value="$(arg max_feature_history_points)" />

@@ -1,5 +1,9 @@
 #include "voxel_map.hpp"
 #include <Eigen/Dense>
+#include <chrono>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <cmath>
 #include <iostream>
 #include <algorithm>
@@ -240,29 +244,99 @@ void buildVoxelAndPillarMap(
     const ClassifyParams &params,
     std::unordered_map<VoxelKey,  VoxelPoints, VoxelKeyHash>  &voxel_map,
     std::unordered_map<PillarKey, PillarData,  PillarKeyHash> &pillar_map,
-    int &out_voxel_min_removed)
+    int &out_voxel_min_removed,
+    BuildTiming *timing)
 {
+    using Clock = std::chrono::steady_clock;
+    const auto t0 = Clock::now();
+
     out_voxel_min_removed = 0;
     const float inv = 1.0f / params.voxel_size;
     if (voxel_map.empty())
         voxel_map.reserve(std::max<size_t>(1, cloud->size() / 2));
 
     // ── Step 1. 포인트 → voxel 할당 ──────────────────────────────────────
-    for (const auto &pt : cloud->points)
+    // OpenMP가 없으면 스레드 수와 무관하게 직렬 경로만 쓴다.
+    // (pragma가 무시되면 tid가 항상 0이라 1/T만 삽입되는 버그가 되기 때문)
+#ifdef _OPENMP
+    const int nthreads = std::max(1, params.voxel_num_threads);
+#else
+    const int nthreads = 1;
+#endif
+
+    auto t1 = Clock::now();
+
+    if (nthreads <= 1)
     {
-        if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z))
-            continue;
+        for (const auto &pt : cloud->points)
+        {
+            if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z))
+                continue;
 
-        VoxelKey key;
-        key.i = static_cast<int64_t>(std::floor(pt.x * inv));
-        key.j = static_cast<int64_t>(std::floor(pt.y * inv));
-        key.k = static_cast<int64_t>(std::floor(pt.z * inv));
+            VoxelKey key;
+            key.i = static_cast<int64_t>(std::floor(pt.x * inv));
+            key.j = static_cast<int64_t>(std::floor(pt.y * inv));
+            key.k = static_cast<int64_t>(std::floor(pt.z * inv));
 
-        // voxel_map[key] 조회를 1회로 제한 (기존: 2회 중복 조회)
-        auto &vdat = voxel_map[key];
-        vdat.k_index = key.k;
-        vdat.points.emplace_back(pt.x, pt.y, pt.z);
+            // voxel_map[key] 조회를 1회로 제한 (기존: 2회 중복 조회)
+            auto &vdat = voxel_map[key];
+            vdat.k_index = key.k;
+            vdat.points.emplace_back(pt.x, pt.y, pt.z);
+        }
+        t1 = Clock::now();
     }
+    else
+    {
+        // 해시 분할: 스레드 t는 hash(key) % T == t 인 키만 자기 shard에 넣는다.
+        // 키가 스레드별로 배타적이라 같은 shard를 두 스레드가 건드릴 일이 없고,
+        // 서로 다른 shard에 같은 키가 생기지도 않는다 → 락도 중복 제거도 불필요.
+        // 대가는 각 스레드가 전체 포인트를 훑어야 한다는 것(키 계산이 T배 중복).
+        using VoxMap = std::unordered_map<VoxelKey, VoxelPoints, VoxelKeyHash>;
+        std::vector<VoxMap> shards(nthreads);
+        const size_t shard_reserve = cloud->size() / (2u * nthreads) + 1u;
+
+        #pragma omp parallel num_threads(nthreads)
+        {
+            const int tid = omp_get_thread_num();
+            VoxMap &m = shards[tid];
+            m.reserve(shard_reserve);
+            const VoxelKeyHash hasher;
+
+            for (const auto &pt : cloud->points)
+            {
+                if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z))
+                    continue;
+
+                VoxelKey key;
+                key.i = static_cast<int64_t>(std::floor(pt.x * inv));
+                key.j = static_cast<int64_t>(std::floor(pt.y * inv));
+                key.k = static_cast<int64_t>(std::floor(pt.z * inv));
+
+                if (static_cast<int>(hasher(key) % static_cast<size_t>(nthreads)) != tid)
+                    continue;
+
+                auto &vdat = m[key];
+                vdat.k_index = key.k;
+                vdat.points.emplace_back(pt.x, pt.y, pt.z);
+            }
+        }
+        t1 = Clock::now();
+
+        // shard → 단일 map 병합. extract/insert는 노드를 그대로 옮기므로
+        // VoxelPoints의 주소가 보존된다. PillarData.voxels가 이 주소를 들고
+        // 있으므로 값 복사로 옮기면 안 된다.
+        for (auto &sh : shards)
+        {
+            for (auto it = sh.begin(); it != sh.end(); )
+            {
+                auto next = std::next(it);
+                voxel_map.insert(sh.extract(it));
+                it = next;
+            }
+        }
+    }
+
+    const auto t_merge = Clock::now();
 
     if (pillar_map.empty())
         pillar_map.reserve(voxel_map.size());
@@ -284,5 +358,13 @@ void buildVoxelAndPillarMap(
         PillarData &pdat = pillar_map[pkey];
         pdat.point_count += vdat.points.size();
         pdat.voxels.push_back(&vdat);
+    }
+
+    if (timing)
+    {
+        using Ms = std::chrono::duration<double, std::milli>;
+        timing->step1_assign_ms = Ms(t1 - t0).count();
+        timing->step1_merge_ms  = Ms(t_merge - t1).count();
+        timing->step2_pillar_ms = Ms(Clock::now() - t_merge).count();
     }
 }

@@ -18,6 +18,8 @@
 //
 // Source selection (param `source_mode`):
 //   "features"    -> scan_plane_features + scan_corner_features (concatenated)
+//   "static"      -> scan_static_features (분류 없이 동적 제거만 거친 단일 클라우드,
+//                    online_static_feature_node의 use_feature_classification=0)
 //   "accumulated" -> raw dense window cloud (baseline / ablation)
 //
 // Outputs:
@@ -54,11 +56,16 @@
 
 #include <Eigen/Geometry>
 
+#include <cerrno>
+#include <cstring>
 #include <deque>
 #include <fstream>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <vector>
 
 namespace
@@ -135,8 +142,13 @@ public:
     MapLocalizerNode() : pnh_("~")
     {
         loadParams();
+        // 맵 로드 + 다운샘플 + target 자료구조 구축은 시작 시 1회지만, 조건마다
+        // 맵 크기가 다르므로(feature map vs raw map) 비용과 점 수를 기록해 둔다.
+        const auto t_map0 = SteadyClock::now();
         loadMap();
         initMatcher();
+        map_prep_ms_ = elapsedMs(t_map0, SteadyClock::now());
+        map_points_ = map_cloud_->size();
         initLog();
 
         map_pose_pub_ = pnh_.advertise<geometry_msgs::PoseStamped>("map_pose", 10);
@@ -145,6 +157,17 @@ public:
         aligned_pub_ = pnh_.advertise<sensor_msgs::PointCloud2>("aligned_source", 1);
         path_pub_ = pnh_.advertise<nav_msgs::Path>("path", 1);
         marker_pub_ = pnh_.advertise<visualization_msgs::MarkerArray>("markers", 1);
+        // latched: RViz를 나중에 켜도 받을 수 있다. 시작 시 1회 발행이라
+        // 프레임별 처리시간에는 영향이 없다. map_voxel_leaf 적용 후의 실제
+        // 정합 target이므로 원본 PCD를 따로 띄우는 것보다 디버깅에 정확하다.
+        map_cloud_pub_ = pnh_.advertise<sensor_msgs::PointCloud2>("map_cloud", 1, true);
+        {
+            sensor_msgs::PointCloud2 map_msg;
+            pcl::toROSMsg(*map_cloud_, map_msg);
+            map_msg.header.stamp = ros::Time::now();
+            map_msg.header.frame_id = map_frame_id_;
+            map_cloud_pub_.publish(map_msg);
+        }
 
         odom_sub_ = nh_.subscribe(odom_pose_topic_, 50,
                                   &MapLocalizerNode::odomPoseCallback, this);
@@ -161,7 +184,10 @@ public:
         }
         else
         {
-            accumulated_sub_ = nh_.subscribe(accumulated_topic_, 2,
+            // static / accumulated 모두 단일 토픽이라 sync 없이 그대로 받는다.
+            const std::string &topic =
+                (source_mode_ == "static") ? static_topic_ : accumulated_topic_;
+            accumulated_sub_ = nh_.subscribe(topic, 2,
                                              &MapLocalizerNode::accumulatedCallback, this);
         }
 
@@ -189,6 +215,8 @@ private:
                                 "/online_static_feature/scan_plane_features");
         pnh_.param<std::string>("corner_feature_topic", corner_topic_,
                                 "/online_static_feature/scan_corner_features");
+        pnh_.param<std::string>("static_feature_topic", static_topic_,
+                                "/online_static_feature_node/scan_static_features");
         pnh_.param<std::string>("accumulated_topic", accumulated_topic_,
                                 "/online_static_feature/accumulated_window");
         pnh_.param<std::string>("odom_pose_topic", odom_pose_topic_,
@@ -239,9 +267,10 @@ private:
 
         if (map_pcd_path_.empty())
             throw std::runtime_error("[map_localizer] map_pcd_path is required.");
-        if (source_mode_ != "features" && source_mode_ != "accumulated")
+        if (source_mode_ != "features" && source_mode_ != "static" &&
+            source_mode_ != "accumulated")
             throw std::runtime_error("[map_localizer] source_mode must be "
-                                     "'features' or 'accumulated'.");
+                                     "'features', 'static' or 'accumulated'.");
     }
 
     // -------------------------------------------------------------------- map
@@ -380,6 +409,8 @@ private:
     {
         if (traj_pcd_path_.empty() || traj_cloud_.empty())
             return;
+        if (!ensureParentDirectory(traj_pcd_path_))
+            return;
         traj_cloud_.width = static_cast<uint32_t>(traj_cloud_.size());
         traj_cloud_.height = 1;
         traj_cloud_.is_dense = true;
@@ -391,15 +422,74 @@ private:
                             << traj_cloud_.size() << " poses): " << traj_pcd_path_);
     }
 
+    // 상위 디렉토리를 재귀 생성한다. accumulator/feature 노드와 동일한 동작.
+    // 이게 없으면 output_dir이 없을 때 CSV가 조용히 안 써진다.
+    bool ensureParentDirectory(const std::string &path) const
+    {
+        const size_t slash = path.find_last_of('/');
+        if (slash == std::string::npos || slash == 0)
+            return true;
+
+        std::string current;
+        const std::string dir = path.substr(0, slash);
+        size_t start = 0;
+        if (!dir.empty() && dir[0] == '/')
+        {
+            current = "/";
+            start = 1;
+        }
+
+        while (start < dir.size())
+        {
+            const size_t next = dir.find('/', start);
+            const std::string part = dir.substr(start, next - start);
+            if (!part.empty())
+            {
+                if (current.size() > 1)
+                    current += "/";
+                current += part;
+                if (::mkdir(current.c_str(), 0755) != 0 && errno != EEXIST)
+                {
+                    ROS_ERROR_STREAM("[map_localizer] mkdir failed: " << current
+                                     << " (" << std::strerror(errno) << ")");
+                    return false;
+                }
+            }
+            if (next == std::string::npos)
+                break;
+            start = next + 1;
+        }
+        return true;
+    }
+
     void initLog()
     {
         if (log_csv_path_.empty())
             return;
+        if (!ensureParentDirectory(log_csv_path_))
+            return;
         log_.open(log_csv_path_, std::ios::out | std::ios::trunc);
-        log_ << "frame,stamp,matcher,source_mode,source_points,"
+        if (!log_.is_open())
+        {
+            ROS_ERROR_STREAM("[map_localizer] failed to open log: " << log_csv_path_);
+            return;
+        }
+        // 기본 ostream 정밀도는 유효숫자 6자리라 ROS 타임스탬프(~1.7e9)가
+        // 1.69e+09로 뭉개진다. stamp는 다른 노드 CSV와의 조인 키이고 x/y/z는
+        // 정밀도 평가 대상이므로 고정소수점 6자리로 고정한다.
+        // accumulator/feature 노드도 같은 설정을 쓴다.
+        log_ << std::fixed << std::setprecision(6);
+        // map_points / map_prep_ms는 시작 시 1회 확정되는 값이라 매 행에 같은 값이
+        // 반복된다. 조건별 맵 크기와 초기화 비용을 CSV만 보고 알 수 있게 남긴다.
+        // preprocess_ms: small_gicp preprocess_points (복셀 축약 + KD-tree + 공분산)
+        // align_ms     : 순수 정합 반복. NDT는 preprocess_ms=0.
+        // src_points_used: 위 축약을 거쳐 실제로 정합에 들어간 점 수.
+        log_ << "frame,stamp,matcher,source_mode,source_points,src_points_used,"
+             << "map_points,map_prep_ms,"
              << "x,y,z,roll,pitch,yaw,"
              << "corr_dx,corr_dy,corr_dz,corr_dyaw,"
-             << "fitness,converged,rejected,align_ms\n";
+             << "fitness,converged,rejected,preprocess_ms,align_ms,total_ms\n";
+        ROS_INFO_STREAM("[map_localizer] log: " << log_csv_path_);
     }
 
     // ------------------------------------------------------------- callbacks
@@ -500,12 +590,21 @@ private:
         bool converged = false;
         Eigen::Isometry3d T_map_odom_new = prediction;
 
+        // preprocess와 align을 분리해서 잰다. small_gicp 경로는 매 프레임
+        // source에 대해 복셀 축약 + KD-tree + 공분산을 새로 만드는데, 점 수가
+        // 많을수록 이쪽이 정합 반복보다 더 커질 수 있다. 합쳐서 재면 raw가
+        // 느린 이유를 "점이 많아서"인지 "전처리 때문"인지 귀속할 수 없다.
+        double preprocess_ms = 0.0;
+        size_t src_points_used = source->size();
+
         const auto t0 = SteadyClock::now();
         if (matcher_type_ == "ndt")
             converged = alignNdt(source, prediction, T_map_odom_new, fitness);
         else
-            converged = alignSmallGicp(source, prediction, T_map_odom_new, fitness);
-        const double align_ms = elapsedMs(t0, SteadyClock::now());
+            converged = alignSmallGicp(source, prediction, T_map_odom_new, fitness,
+                                       preprocess_ms, src_points_used);
+        const double total_ms = elapsedMs(t0, SteadyClock::now());
+        const double align_ms = total_ms - preprocess_ms;
 
         // Gating: odometry 예측 대비 보정량 제한
         const Eigen::Isometry3d delta = prediction.inverse() * T_map_odom_new;
@@ -523,7 +622,8 @@ private:
                 converged, corr_trans, corr_rot_deg);
 
         publishAndLog(source, stamp, T_odom_lidar, prediction,
-                      fitness, converged, rejected, align_ms);
+                      fitness, converged, rejected,
+                      preprocess_ms, align_ms, total_ms, src_points_used);
     }
 
     bool alignNdt(const CloudXYZ::Ptr &source,
@@ -540,12 +640,16 @@ private:
 
     bool alignSmallGicp(const CloudXYZ::Ptr &source,
                         const Eigen::Isometry3d &guess,
-                        Eigen::Isometry3d &result, double &fitness)
+                        Eigen::Isometry3d &result, double &fitness,
+                        double &preprocess_ms, size_t &src_points_used)
     {
+        const auto t_pre = SteadyClock::now();
         const auto source_vec = cloudToVec4f(*source);
         auto [sg_source, sg_source_tree] =
             small_gicp::preprocess_points(source_vec, sg_downsample_resolution_,
                                           10, sg_num_threads_);
+        preprocess_ms = elapsedMs(t_pre, SteadyClock::now());
+        src_points_used = sg_source->size();
         (void)sg_source_tree;
         // VGICP는 GaussianVoxelMap 전용 오버로드를, 나머지(GICP/ICP/PLANE_ICP)는
         // target KD-tree 오버로드를 호출해야 한다. tree 오버로드에 VGICP를 넘기면
@@ -569,7 +673,8 @@ private:
                        const Eigen::Isometry3d &T_odom_lidar,
                        const Eigen::Isometry3d &prediction,
                        double fitness, bool converged, bool rejected,
-                       double align_ms)
+                       double preprocess_ms, double align_ms, double total_ms,
+                       size_t src_points_used)
     {
         frame_count_++;
         const Eigen::Isometry3d T_map_lidar = T_map_odom_ * T_odom_lidar;
@@ -633,7 +738,8 @@ private:
         rpyFromIsometry(delta, droll, dpitch, dyaw);
         log_ << frame_count_ << ',' << stamp.toSec() << ','
              << matcher_type_ << ',' << source_mode_ << ','
-             << source->size() << ','
+             << source->size() << ',' << src_points_used << ','
+             << map_points_ << ',' << map_prep_ms_ << ','
              << T_map_lidar.translation().x() << ','
              << T_map_lidar.translation().y() << ','
              << T_map_lidar.translation().z() << ','
@@ -643,7 +749,8 @@ private:
              << delta.translation().z() << ','
              << dyaw << ','
              << fitness << ',' << (converged ? 1 : 0) << ','
-             << (rejected ? 1 : 0) << ',' << align_ms << '\n';
+             << (rejected ? 1 : 0) << ','
+             << preprocess_ms << ',' << align_ms << ',' << total_ms << '\n';
         log_.flush();
     }
 
@@ -667,12 +774,14 @@ private:
     ros::Publisher aligned_pub_;
     ros::Publisher path_pub_;
     ros::Publisher marker_pub_;
+    ros::Publisher map_cloud_pub_;
     nav_msgs::Path path_;
     int max_path_poses_ = 0;  // 0 = 무제한
 
     std::string map_pcd_path_, map_pcd_path2_;
     std::string matcher_type_, source_mode_;
-    std::string plane_topic_, corner_topic_, accumulated_topic_, odom_pose_topic_;
+    std::string plane_topic_, corner_topic_, static_topic_;
+    std::string accumulated_topic_, odom_pose_topic_;
     std::string map_frame_id_;
     std::string odom_frame_id_;
     std::string log_csv_path_;
@@ -713,6 +822,9 @@ private:
 
     std::string traj_pcd_path_;
     pcl::PointCloud<pcl::PointXYZI> traj_cloud_;
+
+    double map_prep_ms_ = 0.0;   // 맵 로드+다운샘플+target 구축 (시작 시 1회)
+    size_t map_points_ = 0;      // map_voxel_leaf 적용 후 맵 점 수
 };
 
 int main(int argc, char **argv)
