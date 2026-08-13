@@ -20,7 +20,10 @@ find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common filters io registration)
 find_package(OpenMP)
 
-set(SMALL_GICP_ROOT "/home/rain/small_gicp_ws/small_gicp" CACHE PATH
+# 워크스페이스 안에 최소 세트를 동봉했다(third_party/small_gicp, MIT).
+# clone 한 번으로 빌드가 되도록 기본값을 in-tree 경로로 둔다.
+# 외부 체크아웃을 쓰려면 -DSMALL_GICP_ROOT=... 로 덮어쓴다.
+set(SMALL_GICP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/small_gicp" CACHE PATH
   "Path to the small_gicp source tree")
 set(SMALL_GICP_INCLUDE_DIR "${SMALL_GICP_ROOT}/include")
 
