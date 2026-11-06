@@ -72,6 +72,7 @@ GPU 인프라가 불필요하다는 경량성이 contribution.
 ### 2.2 평가 metric: 정확도(accuracy) 아님, 정밀도(precision)만
 
 GT 없음 → precision-only 평가로 확정.
+(실데이터 기준. Isaac Sim 시뮬레이션에서는 GT로 accuracy 평가를 추가한다 → 2.4절)
 - **반복성(repeatability)**: 동일 map/scan 세션 쌍에 초기 pose perturbation
   (±0.5m, ±2°)을 N회(예: 20회) 주고 반복 실행 → 각 프레임 pose 추정치의
   표준편차/3σ.
@@ -89,6 +90,65 @@ GT 없음 → precision-only 평가로 확정.
   무관하게 정적 feature가 유리함을 보이기 위해 2개 backend로 검증
 - primitive matcher가 future work로 빠졌으므로 이 2×2가 최종 실험 범위.
   (예전엔 여기에 `primitive` 축 추가를 계획했으나 확정 스코프에서 제외됨)
+
+### 2.4 Isaac Sim 기반 정확도(accuracy) 평가 (ROS 2 Jazzy, MAV_Localizer)
+
+2.2의 실데이터(노은역) 실험은 GT가 없어 precision-only지만, Isaac Sim에서는
+위치 GT를 얻을 수 있으므로 **정량적 정확도 평가**를 추가로 수행한다.
+실행 환경은 ROS 2 Jazzy이며, 이를 위해 `online_static_feature_ws`를
+ROS 2로 포팅한 `MAV_Localizer` 워크스페이스를 만들었다.
+
+**(1) 지도 작성 (데이터 수집은 재현님이 직접 수행)**
+- Isaac Sim 제공 공간 모델 안에서 라이다 센서 모델(OS2 64ch)을 장착한 로봇
+  또는 지게차를 이동시키며 포인트 클라우드를 수집한다.
+- 각 프레임마다 위치 정보를 `/tf`에서 기록한다.
+  - `frame_id: jackal`: 전역 원점 (0, 0, 0) 좌표계 = 글로벌 맵 좌표계
+  - `child_frame_id: OS2_64ch`: 라이다 센서 좌표계
+- 매 프레임의 pcd(라이다 좌표계)를 `jackal`↔`OS2_64ch` transform으로 변환해
+  `jackal` 좌표계로 옮기고, 이를 누적해 글로벌 맵을 구축한다.
+  즉 `p_map = T_jackal_OS2(t) · p_lidar`이다. tf의 (parent=jackal, child=OS2_64ch)
+  변환을 그대로 적용하면 child 좌표가 parent 좌표로 옮겨진다.
+- 이 raw 맵을 `offline_static_feature_ws`로 처리해 static feature 맵을 만든다.
+  raw 맵 자체는 `accumulated` baseline용 맵으로 쓴다.
+- 지도를 만들 때 확인할 것:
+  - **tf 시점 일치:** 각 프레임의 `header.stamp` 시점의 transform을 써야 한다.
+    최신 tf를 쓰면 이동 중 프레임이 어긋난다.
+  - **`jackal`이 정말 고정 좌표계인지:** 이동 중에 `jackal→OS2_64ch`
+    값이 변하는지 확인한다. 값이 상수라면 센서 장착 static tf이고 `jackal`은
+    로봇 몸체 좌표계다. 이 경우 world(odom)→`jackal` 변환을 추가로 곱해야
+    전역 좌표가 된다.
+
+**(2) 스캔 (localization 입력) 및 실행**
+- MAV_Localizer는 외부 PC(Ubuntu 24.04, ROS 2 Jazzy)에서 동작시킨다.
+- 지도는 (1)에서 만든 지도를 쓴다.
+- 스캔은 TeamViewer로 원격 접속한 Isaac Sim에서 얻는다. 지도를 만든 것과
+  **동일한 공간 모델**에서 동적 객체(사람) 이벤트를 활성화해, 지도 수집 당시와
+  달라진 dynamic environment를 만든다. 그 상태에서 같은 로봇/지게차의 라이다
+  센서 모델로 스캔한 pcd를 입력으로 쓴다.
+- TeamViewer는 화면 공유일 뿐이다. 스캔 데이터는 별도로 외부 PC에 전달해야 한다.
+  - **실시간:** 같은 네트워크 + 같은 `ROS_DOMAIN_ID`로 DDS를 통해 받는다.
+  - **기록 후 재생:** Isaac Sim PC에서 `ros2 bag record`로 기록하고 외부 PC로 옮겨 재생한다.
+  - 둘 중 어떤 방식인지 정해야 한다.
+- 초기 pose(`init_x/y/z/yaw`)는 스캔 세션 첫 프레임의 GT로 줄 수 있다.
+  2.2의 반복성 평가처럼 여기에 perturbation을 더할 수도 있다.
+
+**(3) 평가: GT vs MAV_Localizer 추정 위치**
+- GT는 스캔 세션의 `/tf`(`jackal`→`OS2_64ch`)에서 얻는다. 이것이 매 프레임 라이다의
+  맵 좌표계 pose(`T_map_lidar`)다.
+- 지도와 GT가 같은 `jackal` 좌표계이므로 Umeyama 정렬 없이 직접 비교한다.
+  기존 `eval_ate.py` / `run_evo.sh`의 정책과 같다(정렬하면 실제 오차까지 흡수된다).
+- 지표는 RMSE / ATE(APE), RPE를 쓴다. `MAV_Localizer/src/online_static_feature/scripts`의
+  도구를 활용한다.
+  - `csv_to_tum.py`: `map_localizer.csv` → 추정 궤적 TUM(`_est.tum`)
+  - `run_evo.sh`: `<prefix>_gt.tum`과 `<prefix>_est.tum`으로 evo APE/RPE 계산 및 그림 생성
+  - `eval_ate.py`: 프레임별 오차와 요약 통계. 단, 현재 GT 로더는 노은역 LAS
+    트랙(`CameraPos/*.PosC`, UTM offset) 전용이다. Isaac Sim GT(`/tf` → TUM)
+    로더를 추가해야 한다.
+- 할 일: 스캔 세션 bag의 `/tf`에서 `jackal→OS2_64ch`를 뽑아 `_gt.tum`으로 저장하는
+  스크립트를 만든다. 시각은 `map_localizer.csv`의 `stamp`와 같은 기준(sim time)으로 맞춘다.
+- Isaac Sim은 자세 GT도 있으므로, `run_evo.sh`의 `-r trans_part`(위치만)에 더해
+  회전 오차(`-r full` 또는 `angle_deg`)도 평가할 수 있다.
+- 비교 조건은 2.3의 2×2 ablation(source_mode × matcher_type)을 그대로 적용한다.
 
 ---
 
