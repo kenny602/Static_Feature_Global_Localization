@@ -161,6 +161,16 @@ ROS 2로 포팅한 `MAV_Localizer` 워크스페이스를 만들었다.
   "47 %")는 frozen 프레임으로 부풀려진 것이므로 인용하지 말 것. 데이터·스크립트·
   결과 세대 구분은 `isaac_data/HANDOFF_PROMPT.md` 참고. 남은 일: 조건당 반복
   실행(초기 pose perturbation)으로 분산 확보.
+- **이 PC(ROS1)에서도 Isaac 데이터 실험 가능 (2026-11-09 구축·검증)**:
+  - 데이터: `/home/rain/data/IsaacSim_Warehouse/isaac_data/` (맵, attempt bag, GT 전부 있음).
+  - `scripts/convert_isaac_mcap.sh` : Jazzy mcap → ROS1 bag(`online_scan_scenario_ros1/attempt_N.bag`,
+    `/point_cloud`만). rosbags 0.9.23이 metadata version 9를 거부해 version 8로 바꾼 사본으로 읽는다.
+  - `scripts/run_isaac_ros1.sh [attempts] [conds]` : 조건(raw_dyn/mav_sta…) × attempt 일괄 실행.
+    `config/localization_isaac.yaml` + `config/gis_isaac_feature.yaml`(voxel 0.25 — ROS2 Isaac 실험과
+    동일; 노은역은 0.5) 사용, init pose는 `attempt_N_gt/init_pose.txt`, 전용 roscore(11411).
+    `EXTRACT_FRAME=odom|map_init|map_live`로 feature 격자 좌표계 A/B. 결과는
+    `isaac_data/experiments/results_ros1_<frame>/`, 평가는 기존 `eval_isaac_ate.py --results … --out …`.
+  - 검증: attempt_1 mav_sta ATE RMSE 0.0416 m (ROS2 0.0445 m), 842/842 프레임, 10 Hz 실시간.
 
 ---
 

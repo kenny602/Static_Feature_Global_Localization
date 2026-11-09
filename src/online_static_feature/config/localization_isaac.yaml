@@ -1,0 +1,178 @@
+# ===========================================================================
+# Isaac Sim 창고 데이터(ROS1 변환 bag) 실험 설정.
+#
+# localization.yaml 과의 차이:
+#   - input_topic: /point_cloud  (Isaac RTX lidar, frame_id sim_lidar, 10 Hz, 131k pts,
+#     x/y/z/intensity float32). bag 은 scripts/convert_isaac_mcap.sh 로 변환한 것.
+#   - 맵: isaac_data/gt_map/{static,dynamic}/dynamic_environment_1 (jackal 좌표계).
+#     조건별 맵은 run_isaac_ros1.sh 가 launch 인자(map_pcd_path/2)로 넘긴다.
+#   - init pose: 각 attempt 의 첫 프레임 GT (online_scan_scenario/attempt_N_gt/init_pose.txt).
+#     아래 기본값은 attempt_1 이며, run_isaac_ros1.sh 가 트랙마다 덮어쓴다.
+# 나머지(정합·feature 파라미터)는 localization.yaml 과 동일하게 유지한다
+# (ROS2 쪽 experiments/localization_isaac.yaml 과 같은 정책).
+# ===========================================================================
+
+# ── scan matching odometry ─────────────────────────────────────────────────
+# 세 조건(features / static / accumulated)에서 완전히 동일하게 동작한다.
+# 따라서 T_odom_lidar가 같고, map matching 입력만 달라지는 통제된 비교가 된다.
+scan_matching_accumulator_node:
+  input_topic: /point_cloud   # Isaac RTX lidar (ROS1 변환 bag)
+  odom_frame: odom
+
+  # raw 1프레임을 odom frame으로 발행. accumulated 조건의 소스가 바로 이것.
+  window_frames: 1
+  submap_frames: 1          # scan-to-scan (target = 직전 1프레임)
+  publish_every_n_frames: 1
+  publish_only_full_window: true
+  publish_submap: false
+
+  registration_type: VGICP
+  registration_leaf_size: 0.5   # 정합용 사본 축약. 원본은 보존된다.
+  dense_leaf_size: 0.0          # 0 = 발행 클라우드에 복셀 축약 없음
+  max_correspondence_distance: 2.0
+  voxel_resolution: 1.0
+  num_threads: 4
+
+  # 입력 crop. 여기서만 점이 실제로 버려진다.
+  min_range: 1.0
+  max_range: 120.0
+  z_min: -3.0
+  z_max: 8.0
+
+  latency_log_enabled: true
+
+# ── static feature 추출 ────────────────────────────────────────────────────
+# source_mode=accumulated일 때는 이 노드를 아예 기동하지 않는다.
+# 알고리즘 임계값은 gis_online_feature.yaml에서 온다.
+online_static_feature_node:
+  cloud_topic: /scan_matching_accumulator_node/dense_window_cloud
+  pose_topic: /scan_matching_accumulator_node/scan_matching_pose
+  map_frame: odom
+
+  # pillar 통계(n_voxel_min, n_ref, span filter)가 점 밀도를 가정하므로
+  # feature 조건에는 누적이 필요하다. raw 조건에는 해당 없음.
+  window_frames: 3
+  publish_every_n_frames: 1
+
+  # dense_window_cloud가 이미 odom frame이라 추가 변환 불필요
+  transform_with_pose: false
+
+  # 정적 feature를 추출하는 좌표계 (A/B 비교용 스위치. launch arg로도 덮어쓴다).
+  #   false: odom 좌표계에서 voxel/pillar 격자 구성 (기존 동작). 격자가 장면에 고정된다.
+  #   true : map_localizer가 직전 프레임에 낸 T_map_odom(C)을 window 전체에 똑같이 곱해
+  #          map 좌표계에서 격자를 구성한다. window 내부 상대 배치는 바뀌지 않고,
+  #          격자가 offline 맵과 같은 칸에 놓인다. 출력은 C^-1로 되돌려 여전히
+  #          odom 좌표계로 발행하므로 map_localizer 쪽은 바뀌지 않는다.
+  #          C가 프레임마다 흔들리면 그만큼 격자가 장면 위에서 움직인다는 점이 trade-off.
+  #   accumulated(raw) 조건은 이 노드를 안 거치므로 영향 없음.
+  extract_in_map_frame: false
+  # odom | map_init | map_live (설명은 localization.yaml). run_isaac_ros1.sh 가 EXTRACT_FRAME 으로 덮어쓴다.
+  extract_frame: odom
+  map_odom_topic: /map_localizer/map_odom_pose
+
+  static_feature_topic: scan_static_features
+  sync_slop_sec: 0.05
+  latency_log_enabled: true
+
+  # classifyAllPillars의 pillar 루프 OpenMP 스레드 수. 1이면 직렬.
+  # 12코어인데 accumulator(num_threads=6)와 map_localizer(sg_num_threads=6)가
+  # 동시에 돌므로 다 쓰면 경합한다.
+  classify_num_threads: 4
+
+  # buildVoxelAndPillarMap Step1(포인트→voxel 해시 삽입) 스레드 수.
+  # 1 = 기존 단일 map 직렬 경로 (발산 시 여기로 즉시 복귀).
+  # 2 이상이면 스레드별 shard에 나눠 담고 node handle splice로 합친다.
+  # voxel build와 classify는 순차 실행이라 둘 다 4로 둬도 노드 피크는 4다.
+  voxel_num_threads: 1
+
+# ── scan-to-map localization ───────────────────────────────────────────────
+map_localizer:
+  # source_mode=accumulated(raw)면 raw 맵, features/static이면 feature 맵.
+  # map_pcd_path: /home/rain/data/ETRI_노은역/PCD_RESULT/raw_map.pcd
+  # map_pcd_path2: ""
+  # 예전 수집 feature 맵을 쓸 때(static point):
+  # map_pcd_path:  /home/rain/offline_static_feature_ws/src/output_corner_define_pcd/ETRI_노은역/ETRI_50cm_surface.pcd
+  # map_pcd_path2: /home/rain/offline_static_feature_ws/src/output_corner_define_pcd/ETRI_노은역/ETRI_50cm_corner.pcd
+  # map_pcd_path:  /home/rain/offline_static_feature_ws/src/output_corner_define_pcd/ETRI_노은역/LAS_data/ETRI_xyzi_surface.pcd
+  # map_pcd_path2: /home/rain/offline_static_feature_ws/src/output_corner_define_pcd/ETRI_노은역/LAS_data/ETRI_xyzi_corner.pcd
+  # LAS - prior map / ETRI bag 파일 - online 스캔
+  # map_pcd_path: /home/rain/data/ETRI_노은역/new_data/pcd_result/LAS_ICRA_map.pcd
+  # map_pcd_path2: ""
+  map_pcd_path:  /home/rain/data/IsaacSim_Warehouse/isaac_data/gt_map/static/dynamic_environment_1/gt_map_surface.pcd
+  map_pcd_path2: /home/rain/data/IsaacSim_Warehouse/isaac_data/gt_map/static/dynamic_environment_1/gt_map_corner.pcd
+
+  # source_mode별 입력 토픽
+  plane_feature_topic:  /online_static_feature_node/scan_plane_features
+  corner_feature_topic: /online_static_feature_node/scan_corner_features
+  static_feature_topic: /online_static_feature_node/scan_static_features
+  # accumulated: accumulator가 직접 발행하는 raw 클라우드.
+  # feature 노드를 거치지 않으므로 추출 비용이 전혀 들어가지 않는다.
+  # odom frame이며 accumulator의 range/z crop만 거친 상태다
+  # (dense_leaf_size=0.0이라 복셀 축약 없음). 단 정합 직전에 matcher가
+  # 다시 축약한다 - small_gicp는 sg_downsample_resolution, NDT는 축약 없음.
+  accumulated_topic: /scan_matching_accumulator_node/dense_window_cloud
+  odom_pose_topic:   /scan_matching_accumulator_node/scan_matching_pose
+
+  # LSMCL initialize를 대신하는 수동 초기 pose = 첫 프레임 T_map_lidar.
+  # 예전 output_corner_define_pcd 맵은 세션 시작 pose가 원점이라 전부 0이었지만,
+  # LAS 맵은 UTM52N(EPSG:32652)에서 offset(348800, 4026400, 70)만 뺀 좌표계라
+  # 0이면 맵 밖 250 m+ 지점에서 시작한다.
+  #
+  # 산출 근거 (bag: ~/data/ETRI_노은역/bag/test1_ros1_standard.bag)
+  #  x,y : /ublox_gps_node/fix 첫 fix를 UTM52N 변환 -> (396.92, 205.21).
+  #        첫 스캔을 맵에 대고 ±25 m 2D 전역탐색한 최적점이 여기서 1.4 m 거리라
+  #        GPS가 맞는 것으로 확인(수동 CloudCompare 픽은 15 m 틀렸었다).
+  #        x는 동서 도로 방향이라 점수 능선이 길다 -> 불확실도 ~±2 m.
+  #        y는 ±4 m만 벗어나도 점수가 급락 -> 잘 구속됨.
+  #  z   : 맵 지면 17.06 + 센서 높이 0.64 = 17.70.
+  #        센서 높이는 첫 스캔의 지면 z(-0.64)에서 역산했고 교수님 값 0.6 m와 일치.
+  #        GPS 고도는 쓰지 말 것 - 평탄 구간인데 세션 중 21.8~39.7로 18 m 흔들린다.
+  #  yaw : 교수님 확인값 0. GPS 궤적 출발 heading +1.1°,
+  #        CloudCompare 진행방향 5점 TLS 적합 -0.36° -> 셋이 일치.
+  #        yaw 오차 2°면 50 m 점이 1.7 m 밀린다. sg_max_corr_dist=2.0 이므로
+  #        ±2° 안이어야 하는데 충분히 들어온다.
+  init_x: 0.1181     # attempt_1 첫 프레임 GT (T_map_lidar); 실행 시 덮어씀
+  init_y: 0.0
+  init_z: 0.4264
+  init_yaw: 0.0
+  # init_x: 0.0
+  # init_y: 0.0
+  # init_z: 0.0
+  # init_yaw: 0.0
+
+  map_voxel_leaf: 0.25          # 맵 로드 직후 1회. matcher 종류와 무관. -> 0.2 이상을 써야 다운샘플링 됨
+  # RViz 표시용 map_cloud 토픽 전용 축약 [m]. 정합에는 영향 없음.
+  # raw 맵은 0.25로 축약해도 수천만 점이라 RViz가 못 띄운다.
+  # 0 = 끄기(정합 target을 그대로 발행).
+  viz_voxel_leaf: 0.0
+  source_voxel_leaf: 0.0        # 0 = off (NDT 경로의 source 축약)
+  ndt_resolution: 1.0
+  sg_downsample_resolution: 0.25 # small_gicp preprocess_points (축약+KD-tree+공분산)
+  sg_voxel_resolution: 1.0      # VGICP GaussianVoxelMap 복셀 크기 [m]
+  sg_num_threads: 4
+  # 공분산 추정용 kNN 개수. 고윳값은 (1e-3,1,1)로 정규화되어 버려지므로
+  # 이 값은 지역 평면 '법선 방향'의 평균 범위를 정한다.
+  # 10 = small_gicp preprocess_points 기본값
+  # 20 = small_gicp KITTI odometry 벤치마크 값 (HDL-64 dense scan 기준)
+  sg_num_neighbors: 20
+  # correspondence 최대 거리 [m]. 코드 기본값은 1.0이지만 scan matching
+  # (scan_matching_accumulator의 max_correspondence_distance)과 동일하게 2.0을 쓴다.
+  # drift가 이 값을 넘으면 대응점을 못 찾아 회복이 불가능해진다.
+  sg_max_corr_dist: 1.0
+
+  # small_gicp 의 converged 는 정합 품질이 아니라 "마지막 갱신량이 eps 아래였나"다.
+  # 원저자 KITTI 벤치마크도 검사하지 않는다. false = 원본에 가까운 동작.
+  # (true 로 두면 직전 실행처럼 62% 가 이것 하나로 버려진다)
+  reject_on_not_converged: false
+
+  # odometry 예측 대비 보정량 제한. 켜두면 정합 실패가 reject로 흡수되어
+  # 궤적은 멀쩡해 보인다. 실패율을 보려면 CSV의 rejected 열을 같이 봐야 한다.
+  max_correction_trans: 5.0
+  max_correction_rot_deg: 30.0
+
+  # source cloud ↔ odom pose(T_odom_lidar) 동기화 (message_filters ApproximateTime).
+  # 둘 다 같은 입력 스캔의 stamp를 쓰므로 차이는 원래 0이고 0.02 s는 여유값.
+  # 짝이 없는 프레임은 처리하지 않는다(예전처럼 직전 pose를 재사용해 출력이 고정되는 대신 누락).
+  # 종료 로그 "source clouds received=N, processed (synced with odom)=M" 으로 누락 수를 확인한다.
+  odom_sync_slop_sec: 0.02
+  sync_queue_size: 20
