@@ -1,0 +1,124 @@
+# ===========================================================================
+# LAS 트랙 기반 정확도 실험 설정.
+#
+# bag 실험(localization.yaml)과 분리한 이유:
+#   - 입력이 /ouster/points 가 아니라 las_pcl 퍼블리셔다
+#   - 맵이 LAS_EVAL_map.pcd 다 (스캔으로 쓸 트랙을 하나도 포함하지 않는 맵)
+#   - 초기 pose 가 트랙마다 다르다
+#
+# GT: 각 트랙의 CameraPos/*Camera1.PosC (또는 GNSS-INS/*.PosI.ie)
+#     -> cm 급 PPK 라 진짜 ATE 를 낼 수 있다.
+# ===========================================================================
+
+# ── scan matching odometry ─────────────────────────────────────────────────
+scan_matching_accumulator_node:
+  # las_pcl 의 pcl_pub 이 발행하는 토픽. pcl_pub.launch 의 topic 인자와 맞출 것.
+  input_topic: /Pointcloud2
+  odom_frame: odom
+
+  window_frames: 1
+  submap_frames: 1
+  publish_every_n_frames: 1
+  publish_only_full_window: true
+  publish_submap: false
+
+  registration_type: VGICP
+  registration_leaf_size: 0.5
+  dense_leaf_size: 0.0
+  max_correspondence_distance: 2.0
+  voxel_resolution: 1.0
+  num_threads: 4
+
+  # point_pose 클라우드 실측: z 범위 -2.0~30.9, 거리 1.1~60.1 m.
+  # 아래 crop 으로 98.4% 가 통과한다(확인 완료).
+  min_range: 1.0
+  max_range: 120.0
+  z_min: -3.0
+  z_max: 8.0
+
+  latency_log_enabled: true
+
+# ── static feature 추출 ────────────────────────────────────────────────────
+online_static_feature_node:
+  cloud_topic: /scan_matching_accumulator_node/dense_window_cloud
+  pose_topic: /scan_matching_accumulator_node/scan_matching_pose
+  map_frame: odom
+
+  # pillar 통계가 성립하려면 dense window 가 10만 점을 넘어야 한다.
+  # chunk_points=45167(스캐너 1회전) x 3프레임 = 135,501 점.
+  window_frames: 1
+  publish_every_n_frames: 1
+
+  transform_with_pose: false
+  static_feature_topic: scan_static_features
+  sync_slop_sec: 0.05
+  latency_log_enabled: true
+  classify_num_threads: 4
+  voxel_num_threads: 1
+
+# ── scan-to-map localization ───────────────────────────────────────────────
+map_localizer:
+  # 스캔으로 쓸 트랙(024 025 026 027 030 046 047)을 하나도 포함하지 않는 맵.
+  # 구성: TRACK 018 + 028 + 054 + 078(3),  224,783,692 점
+  map_pcd_path: /home/rain/data/ETRI_노은역/new_data/pcd_result/LAS_EVAL_map.pcd
+  map_pcd_path2: ""
+  # map_pcd_path:  /home/rain/offline_static_feature_ws/src/output_ETRI_Noeun_ICRA/LAS_data/ETRI_xyzi_EVAL_surface.pcd
+  # map_pcd_path2: /home/rain/offline_static_feature_ws/src/output_ETRI_Noeun_ICRA/LAS_data/ETRI_xyzi_EVAL_corner.pcd
+  # 예전 수집 raw map을 쓸 때(accumulated)
+  # map_pcd_path: /home/rain/data/ETRI_노은역/PCD_RESULT/raw_map.pcd
+  # map_pcd_path2: ""
+  # 예전 수집 feature 맵을 쓸 때(static point):
+  # map_pcd_path:  /home/rain/offline_static_feature_ws/src/output_corner_define_pcd/ETRI_노은역/ETRI_20cm_v2_surface.pcd
+  # map_pcd_path2: /home/rain/offline_static_feature_ws/src/output_corner_define_pcd/ETRI_노은역/ETRI_20cm_v2_corner.pcd
+  
+
+  plane_feature_topic:  /online_static_feature_node/scan_plane_features
+  corner_feature_topic: /online_static_feature_node/scan_corner_features
+  static_feature_topic: /online_static_feature_node/scan_static_features
+  accumulated_topic: /scan_matching_accumulator_node/dense_window_cloud
+  odom_pose_topic:   /scan_matching_accumulator_node/scan_matching_pose
+
+  # ── 초기 pose ────────────────────────────────────────────────────────────
+  # 각 트랙 *_gps_sorted.las 의 첫 포인트 GPS time 에 대응하는
+  # CameraPos/*Camera1.PosC 센서 위치를 맵 좌표로 변환한 값이다.
+  #   맵좌표 = (Easting-348800, Northing-4026400, Height-70)
+  # init_yaw 는 전부 0 이다. point_pose 모드가 회전을 적용하지 않아
+  # 발행 클라우드가 map(UTM) 축 방향을 그대로 유지하기 때문이다.
+  #
+  #   TRACK024   430.29   374.03   18.81      10,564,447점   96.7초
+  #   TRACK025   429.16   482.44   19.74      14,223,444점  118.6초
+  #   TRACK026   427.54   312.36   18.43      14,234,801점  115.7초
+  #   TRACK027   427.34   206.79   18.07       8,138,617점   67.3초
+  #   TRACK030   337.17   546.10   21.58      30,233,051점  291.7초
+  #   TRACK046   292.16   547.45   21.91      12,043,445점  127.4초
+  #   TRACK047   317.76   365.72   20.92      14,924,523점  155.0초
+  #
+  # 아래에서 돌릴 트랙 하나만 남기고 나머지는 주석 처리한다.
+
+  # --- TRACK047 (기본) ---
+  init_x: 427.34
+  init_y: 206.79
+  init_z: 18.07
+  init_yaw: 0.0
+ 
+  map_voxel_leaf: 0.25
+  viz_voxel_leaf: 0.0
+  source_voxel_leaf: 0.0
+  ndt_resolution: 1.0
+  sg_downsample_resolution: 0.25
+  sg_voxel_resolution: 1.0
+  sg_num_threads: 4
+  sg_num_neighbors: 20
+  sg_max_corr_dist: 1.0
+
+  # small_gicp 의 converged 는 정합 품질이 아니라 "마지막 갱신량이 eps 아래였나"다.
+  # 원저자 KITTI 벤치마크도 검사하지 않는다. false = 원본에 가까운 동작.
+  # (true 로 두면 직전 실행처럼 62% 가 이것 하나로 버려진다)
+  reject_on_not_converged: false
+
+  max_correction_trans: 5.0
+  max_correction_rot_deg: 30.0
+
+  # source cloud ↔ odom pose 동기화 (localization.yaml 의 같은 항목 참고)
+  odom_sync_slop_sec: 0.02
+  sync_queue_size: 20
