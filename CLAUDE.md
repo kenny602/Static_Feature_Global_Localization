@@ -171,6 +171,13 @@ ROS 2로 포팅한 `MAV_Localizer` 워크스페이스를 만들었다.
     `EXTRACT_FRAME=odom|map_init|map_live`로 feature 격자 좌표계 A/B. 결과는
     `isaac_data/experiments/results_ros1_<frame>/`, 평가는 기존 `eval_isaac_ate.py --results … --out …`.
   - 검증: attempt_1 mav_sta ATE RMSE 0.0416 m (ROS2 0.0445 m), 842/842 프레임, 10 Hz 실시간.
+  - **ROS1 전체 결과 (2026-11-10, attempt 1~10, 모두 coverage 100 %, 수신=처리)**:
+    raw_dyn 0.0772 m / mav_sta 0.0712 m (−8 %, 10 bag 중 9개 우세, 최대오차 0.45→0.38 m,
+    >0.5 m 0.12 %→0.03 %, roll RMSE 0.094°→0.035°). ROS2와의 차이는 raw_dyn attempt_6
+    (ROS2 0.157 m 일시 실패가 ROS1에서는 0.077 m)뿐. feature 격자 좌표계 A/B
+    (mav_sta): odom 0.0712 / map_init 0.0707 / map_live 0.0710 → **Isaac에서는 차이 없음**
+    (bag별 차이 ≤ 0.8 cm, GT 정밀도 이내). odom 좌표계 기울기 드리프트는 2~3분에
+    보통 1~1.6°, attempt_2는 5.4°까지 갔지만 ATE 영향 없음.
 
 ---
 

@@ -94,13 +94,20 @@ for A in "${ATTEMPTS[@]}"; do
             init_roll:="${iroll:-0}" init_pitch:="${ipitch:-0}" init_yaw:="$iyaw" \
             > "$OUT/launch.log" 2>&1 &
         LP=$!
-        # localizer 가 맵을 읽고 전처리를 끝내면 "map_points=" 로그가 나온다 (raw 맵 494만 점은 수십 초)
+        # localizer 준비 판정: 맵 로드·전처리가 끝난 뒤에야 source 토픽을 구독하므로,
+        # 그 토픽의 구독자 목록에 /map_localizer 가 나타나면 준비된 것이다.
+        # (launch.log 의 "map_points=" 로그는 파이프 버퍼링 때문에 수 분 늦게 찍혀서 기준으로 못 쓴다)
+        case $mode in
+            static)      src_topic=/online_static_feature_node/scan_static_features ;;
+            accumulated) src_topic=/scan_matching_accumulator_node/dense_window_cloud ;;
+        esac
         for i in $(seq 1 300); do
-            grep -q "map_points=" "$OUT/launch.log" 2>/dev/null && break
+            rostopic info "$src_topic" 2>/dev/null | grep -q "/map_localizer" && break
             kill -0 $LP 2>/dev/null || break
             sleep 1
         done
-        sleep 3
+        echo "[$COND attempt_$A] localizer ready after ${i}s" | tee -a "$LOG"
+        sleep 2
         rosbag play -r "$RATE" "$BAG" --topics /point_cloud > "$OUT/bag.log" 2>&1
         sleep "$DRAIN"
         kill -INT $LP 2>/dev/null; wait $LP 2>/dev/null

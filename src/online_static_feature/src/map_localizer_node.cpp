@@ -736,7 +736,13 @@ private:
 
         // Gating: odometry 예측 대비 보정량 제한 - map matching 오차로 인해 확 튀어서 발산하는 것 방지
         const Eigen::Isometry3d delta = prediction.inverse() * T_map_odom_new;
-        const double corr_trans = delta.translation().norm();
+        // 게이팅은 "센서 위치에서 본" 보정량으로 판단한다.
+        // delta 의 평행이동은 odom 원점 기준이라, 원점에서 r 만큼 떨어진 센서에는 회전 보정 θ 가
+        // r·θ 의 평행이동으로 섞여 들어간다 (0.5° × 300 m ≈ 2.6 m → 정상 보정이 5 m 게이트에 걸림).
+        // (C_prev O_t)^-1 (C_new O_t) = O_t^-1 delta O_t 의 평행이동이 실제 센서 이동량이다.
+        // 회전 각도는 conjugation 에 불변이라 어느 쪽으로 재도 같다.
+        const Eigen::Isometry3d delta_lidar = T_odom_lidar.inverse() * delta * T_odom_lidar;
+        const double corr_trans = delta_lidar.translation().norm();
         const double corr_rot_deg =
             Eigen::AngleAxisd(delta.linear()).angle() * 180.0 / M_PI;
         // small_gicp 의 converged 는 "마지막 갱신량이 eps 아래였나"일 뿐이라
