@@ -214,6 +214,11 @@ private:
     int callback_count_ = 0;
     std::deque<Frame> frames_;
     Eigen::Matrix4f last_delta_ = Eigen::Matrix4f::Identity();
+    // last_delta_가 "직전 두 프레임의 정합 결과"로 채워졌는지 여부.
+    // frames_ 버퍼 크기(max(window, submap))와 무관하게 판단해야 한다.
+    // window=submap=1이면 버퍼가 항상 1장이라 frames_.size()>=2 조건으로는
+    // 등속도 예측이 한 번도 켜지지 않는다.
+    bool has_last_delta_ = false;
     std::ofstream latency_log_;
 
     void loadParams()
@@ -549,11 +554,12 @@ private:
                 << "target=" << target->size()
                 << ", source=" << source->size()
                 << ". Reusing previous pose.");
+            has_last_delta_ = false; // 이 프레임은 이동량이 없으므로 다음 프레임 예측에 직전 delta를 쓰면 안 된다
             return frames_.back().T_odom_lidar; // 정합에 필요한 포인트 수가 너무 적으면, 직전 pose 재사용
         }
 
         Eigen::Matrix4f guess = frames_.back().T_odom_lidar;     // Initial guess 기본값 - 직전 pose
-        if (use_constant_velocity_guess_ && frames_.size() >= 2) // 상수 속도 모델이 활성화되고 과거 프레임이 2개 이상이면
+        if (use_constant_velocity_guess_ && has_last_delta_)     // 등속도 모델: 직전 정합에서 구한 이동량이 있으면
             guess = last_delta_ * frames_.back().T_odom_lidar;   // last_delta_: 직전 두 pose 간 변화량 (직전 이동량이 다음 프레임에도 반복 가정)
 
         // 매 프레임마다 RegistrationSetting을 구성함
@@ -600,6 +606,7 @@ private:
             << ", target=" << target->size());
 
         last_delta_ = final_pose * frames_.back().T_odom_lidar.inverse();
+        has_last_delta_ = true;
         return final_pose;
     }
 

@@ -6,6 +6,7 @@
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/synchronizer.h>
+#include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_cloud.h>
@@ -50,7 +51,13 @@ public:
         // 입력 2개(cloud / pose)의 subscriber 각각 연결
         cloud_sub_.subscribe(nh_, cloud_topic_, 1); // cloud_topic : /scan_matching_accumulator_node/dense_window_cloud
         pose_sub_.subscribe(nh_, pose_topic_, 10);  // pose_topic  : /scan_matching_accumulator_node/scan_matching_pose
-        
+
+        // (옵션) map_localizer가 발행하는 T_map_odom. extract_in_map_frame=true일 때
+        // window를 map 좌표계로 옮겨 voxel/pillar 격자를 구성하는 데 쓴다.
+        if (extract_in_map_frame_)
+            map_odom_sub_ = nh_.subscribe(map_odom_topic_, 10,
+                                          &OnlineStaticFeatureNode::mapOdomCallback, this);
+
         // ApproximateTime synchronizer 설정
         sync_.setMaxIntervalDuration(ros::Duration(sync_slop_sec_));
         // cloud와 pose쌍을 찾아 하나의 콜백으로 전달하여 싱크 맞춰주기
@@ -75,6 +82,7 @@ public:
                         << ", pose_topic=" << pose_topic_
                         << ", window_frames=" << window_frames_
                         << ", transform_with_pose=" << transform_with_pose_
+                        << ", extract_in_map_frame=" << extract_in_map_frame_
                         << ", local_origin_mode=" << local_origin_mode_);
     }
 
@@ -151,6 +159,7 @@ private:
         double ceiling_crop_ms = 0.0;
         double downsample_ms = 0.0;
         double publish_accumulated_ms = 0.0;
+        double map_frame_ms = 0.0;      // extract_in_map_frame: window에 T_map_odom 적용 시간
         double window_algorithm_ms = 0.0;
         double window_total_ms = 0.0;
 
@@ -162,6 +171,8 @@ private:
 
     std::string cloud_topic_ = "/Pointcloud2";
     std::string pose_topic_ = "/lidar_pose";
+    // extract_in_map_frame=true일 때 구독하는 T_map_odom (map_localizer 출력)
+    std::string map_odom_topic_ = "/map_localizer/map_odom_pose";
     std::string map_frame_ = "map";
     std::string accumulated_topic_ = "accumulated_cloud";
     std::string colored_feature_topic_ = "static_features_colored";
@@ -184,6 +195,11 @@ private:
     int processed_feature_frames_ = 0;
     int max_feature_history_points_ = 2000000;
     bool transform_with_pose_ = true;
+    // true: 최신 T_map_odom을 window 전체에 곱해 map 좌표계에서 추출하고,
+    //       출력은 다시 odom 좌표계로 되돌린다. false: 기존대로 odom 좌표계에서 추출.
+    bool extract_in_map_frame_ = false;
+    bool has_map_odom_ = false;
+    Eigen::Affine3f T_map_odom_latest_ = Eigen::Affine3f::Identity();
     bool subtract_local_origin_ = false;
     bool publish_feature_history_ = true;
     bool save_on_shutdown_pcd_ = true;
@@ -199,6 +215,7 @@ private:
     message_filters::Subscriber<CloudMsg> cloud_sub_;
     message_filters::Subscriber<PoseMsg> pose_sub_;
     message_filters::Synchronizer<SyncPolicy> sync_;
+    ros::Subscriber map_odom_sub_;
 
     ros::Publisher accumulated_pub_;
     ros::Publisher colored_feature_pub_;
@@ -233,6 +250,8 @@ private:
         pnh_.param("max_feature_history_points", max_feature_history_points_,
                    max_feature_history_points_);
         pnh_.param("transform_with_pose", transform_with_pose_, transform_with_pose_);
+        pnh_.param("extract_in_map_frame", extract_in_map_frame_, extract_in_map_frame_);
+        pnh_.param<std::string>("map_odom_topic", map_odom_topic_, map_odom_topic_);
         pnh_.param("publish_feature_history", publish_feature_history_, publish_feature_history_);
         pnh_.param("save_on_shutdown_pcd", save_on_shutdown_pcd_,
                    save_on_shutdown_pcd_);
@@ -465,7 +484,7 @@ private:
             << "classify_pillars_ms,cls_pillar_math_ms,cls_emit_ms,"
             << "cls_voxel_pca_ms,cls_voxel_pca_cnt,cls_phi_ms,split_features_ms,"
             << "publish_features_ms,feature_total_ms,"
-            << "window_algorithm_ms,window_total_ms\n";
+            << "window_algorithm_ms,window_total_ms,map_frame_ms\n";
         latency_log_.flush();
 
         ROS_INFO_STREAM("[online_static_feature] latency log: " << latency_log_path_);
@@ -524,7 +543,8 @@ private:
             << r.feature.publish_features_ms << ','
             << r.feature.total_ms << ','
             << r.window_algorithm_ms << ','
-            << r.window_total_ms << '\n';
+            << r.window_total_ms << ','
+            << r.map_frame_ms << '\n';
         latency_log_.flush();
     }
 
@@ -644,14 +664,34 @@ private:
         stage_end = SteadyClock::now();
         latency.publish_accumulated_ms = elapsedMs(stage_start, stage_end);
 
-        // 8. 특징점 추출
-        extractAndPublishFeatures(accumulated, cloud_msg->header.stamp, latency.feature);
+        // 8. (옵션) 추출 좌표계 선택
+        // extract_in_map_frame=true: 최신 T_map_odom(C)을 window 전체에 똑같이 곱해
+        // map 좌표계에서 voxel/pillar 격자를 구성한다. window 내부 상대 배치는 그대로다.
+        // 추출 결과는 C^-1로 되돌려 odom 좌표계로 발행하므로 다른 노드는 바뀌지 않는다.
+        // (정합은 강체변환에 공변이라 localizer가 C를 다시 곱해도 같은 문제를 푼다.)
+        // 아직 C를 못 받았으면(첫 프레임) 기존대로 odom 좌표계에서 추출한다.
+        // accumulated_cloud는 위에서 이미 odom 좌표계로 발행됐다.
+        const Eigen::Affine3f *T_back = nullptr;
+        Eigen::Affine3f T_odom_map = Eigen::Affine3f::Identity();
+        if (extract_in_map_frame_ && has_map_odom_)
+        {
+            stage_start = SteadyClock::now();
+            pcl::transformPointCloud(*accumulated, *accumulated, T_map_odom_latest_);
+            T_odom_map = T_map_odom_latest_.inverse();
+            T_back = &T_odom_map;
+            stage_end = SteadyClock::now();
+            latency.map_frame_ms = elapsedMs(stage_start, stage_end);
+        }
+
+        // 9. 특징점 추출
+        extractAndPublishFeatures(accumulated, cloud_msg->header.stamp, latency.feature, T_back);
 
         latency.window_algorithm_ms =
             latency.accumulate_ms +
             latency.floor_align_ms +
             latency.ceiling_crop_ms +
             latency.downsample_ms +
+            latency.map_frame_ms +
             latency.feature.build_voxel_pillar_ms +
             latency.feature.classify_pillars_ms +
             latency.feature.split_features_ms;
@@ -685,6 +725,19 @@ private:
         return T;
     }
 
+    // map_localizer의 T_map_odom 수신. 가장 최근 값만 보관한다.
+    void mapOdomCallback(const PoseMsg::ConstPtr &msg)
+    {
+        T_map_odom_latest_ = poseToAffine(*msg);
+        if (!has_map_odom_)
+        {
+            has_map_odom_ = true;
+            ROS_INFO_STREAM("[online_static_feature] first T_map_odom received from "
+                            << map_odom_topic_
+                            << "; extracting features in map frame from now on");
+        }
+    }
+
     pcl::PointCloud<pcl::PointXYZ>::Ptr makeAccumulatedCloud() const
     {
         pcl::PointCloud<pcl::PointXYZ>::Ptr accumulated(new pcl::PointCloud<pcl::PointXYZ>());
@@ -716,9 +769,12 @@ private:
     }
 
     // 정적 특징 추출 함수
+    // T_back: null이 아니면 추출 결과(colored)에 곱해 출력 좌표계로 되돌린다
+    //         (extract_in_map_frame일 때 T_odom_map). 입력 cloud 좌표계에서 격자를 만든다.
     void extractAndPublishFeatures(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
                                    const ros::Time &stamp,
-                                   FeatureTiming &timing)
+                                   FeatureTiming &timing,
+                                   const Eigen::Affine3f *T_back = nullptr)
     {
         const TimePoint feature_start = SteadyClock::now();
         TimePoint stage_start = feature_start;
@@ -789,6 +845,11 @@ private:
         timing.corner_ds_removed = corner_ds_removed;
 
         stage_start = SteadyClock::now();
+        // 추출 좌표계가 map(extract_in_map_frame)이었다면 출력은 odom으로 되돌린다.
+        // planes/corners/feature_history 모두 colored에서 파생되므로 여기 한 번이면 된다.
+        // (split_features_ms에 포함)
+        if (T_back)
+            pcl::transformPointCloud(*colored, *colored, *T_back);
         pcl::PointCloud<pcl::PointXYZ>::Ptr planes(new pcl::PointCloud<pcl::PointXYZ>());
         pcl::PointCloud<pcl::PointXYZ>::Ptr corners(new pcl::PointCloud<pcl::PointXYZ>());
 

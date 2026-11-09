@@ -79,6 +79,7 @@ double elapsedMs(const SteadyClock::time_point &a, const SteadyClock::time_point
     return std::chrono::duration<double, std::milli>(b - a).count();
 }
 
+// ROS의 geometry_msgs::Pose를 Eigen의 Isometry3d로 변환
 Eigen::Isometry3d poseMsgToIsometry(const geometry_msgs::Pose &p)
 {
     Eigen::Quaterniond q(p.orientation.w, p.orientation.x,
@@ -93,6 +94,8 @@ Eigen::Isometry3d poseMsgToIsometry(const geometry_msgs::Pose &p)
     return T;
 }
 
+// Eigen::Isometry3d를 ROS의 PoseStamped로 변환
+// 최종 pose와 map-to-odom 보정 pose를 발행할 때 사용
 geometry_msgs::PoseStamped isometryToPoseMsg(const Eigen::Isometry3d &T,
                                              const ros::Time &stamp,
                                              const std::string &frame_id)
@@ -112,15 +115,30 @@ geometry_msgs::PoseStamped isometryToPoseMsg(const Eigen::Isometry3d &T,
     return msg;
 }
 
+// 회전행렬에서 roll, pitch, yaw를 추출
+// CSV 로그에 자세를 기록하기 위함
 void rpyFromIsometry(const Eigen::Isometry3d &T,
                      double &roll, double &pitch, double &yaw)
 {
-    const Eigen::Vector3d e = T.linear().eulerAngles(2, 1, 0); // yaw pitch roll
-    yaw = e[0];
-    pitch = e[1];
-    roll = e[2];
+    // Eigen::eulerAngles(2,1,0) 은 pitch 를 [0,pi] 로 강제하는 탓에
+    // 회전이 없어도 (pi, -pi, pi) 같은 뒤집힌 해를 돌려준다.
+    // 실제로 단위행렬이 yaw=3.14 로 찍혀 "180도 돌아갔다"는 오독을 유발했다.
+    // 직접 분해해서 yaw, roll 을 [-pi,pi], pitch 를 [-pi/2,pi/2] 로 둔다.
+    const Eigen::Matrix3d R = T.linear();
+    pitch = std::asin(std::max(-1.0, std::min(1.0, -R(2, 0))));
+    if (std::abs(R(2, 0)) < 0.999999)   // 짐벌락이 아니면 일반 해
+    {
+        yaw = std::atan2(R(1, 0), R(0, 0));
+        roll = std::atan2(R(2, 1), R(2, 2));
+    }
+    else                                 // pitch = +-90도: yaw 와 roll 이 축퇴
+    {
+        yaw = std::atan2(-R(0, 1), R(1, 1));
+        roll = 0.0;
+    }
 }
 
+// PCL cloud인 PointXYZ(x, y, z)를 small_gicp의 입력 형식 Eigen::Vector4f인 (x, y, z, 1)으로 변환함
 std::vector<Eigen::Vector4f> cloudToVec4f(const CloudXYZ &cloud)
 {
     std::vector<Eigen::Vector4f> out;
@@ -145,14 +163,14 @@ public:
         // 맵 로드 + 다운샘플 + target 자료구조 구축은 시작 시 1회지만, 조건마다
         // 맵 크기가 다르므로(feature map vs raw map) 비용과 점 수를 기록해 둔다.
         const auto t_map0 = SteadyClock::now();
-        loadMap();
-        initMatcher();
-        map_prep_ms_ = elapsedMs(t_map0, SteadyClock::now());
-        map_points_ = map_cloud_->size();
-        initLog();
+        loadMap();         // offline PCD map 로드
+        initMatcher();     // matcher target 전처리
+        map_prep_ms_ = elapsedMs(t_map0, SteadyClock::now());   // 로그 기록용
+        map_points_ = map_cloud_->size();                       // 정합 target map
+        initLog();         // 로깅 시작
 
-        map_pose_pub_ = pnh_.advertise<geometry_msgs::PoseStamped>("map_pose", 10);
-        map_odom_pub_ = pnh_.advertise<geometry_msgs::PoseStamped>("map_odom_pose", 10);
+        map_pose_pub_ = pnh_.advertise<geometry_msgs::PoseStamped>("map_pose", 10);         // 맵 매칭으로 구하는 최종 pose
+        map_odom_pub_ = pnh_.advertise<geometry_msgs::PoseStamped>("map_odom_pose", 10);    // 스캔 매칭으로 넘겨받는 pose (odometry)
         fitness_pub_ = pnh_.advertise<std_msgs::Float32>("fitness", 10);
         aligned_pub_ = pnh_.advertise<sensor_msgs::PointCloud2>("aligned_source", 1);
         path_pub_ = pnh_.advertise<nav_msgs::Path>("path", 1);
@@ -162,44 +180,86 @@ public:
         // 정합 target이므로 원본 PCD를 따로 띄우는 것보다 디버깅에 정확하다.
         map_cloud_pub_ = pnh_.advertise<sensor_msgs::PointCloud2>("map_cloud", 1, true);
         {
+            const CloudXYZ::Ptr viz =
+                (viz_voxel_leaf_ > 0.0 && viz_voxel_leaf_ > map_voxel_leaf_)
+                    ? downsample(map_cloud_, viz_voxel_leaf_)
+                    : map_cloud_;
+            ROS_INFO_STREAM("[map_localizer] map_cloud 발행: " << viz->size()
+                            << " points (viz_voxel_leaf=" << viz_voxel_leaf_ << ")");
             sensor_msgs::PointCloud2 map_msg;
-            pcl::toROSMsg(*map_cloud_, map_msg);
+            pcl::toROSMsg(*viz, map_msg);
             map_msg.header.stamp = ros::Time::now();
             map_msg.header.frame_id = map_frame_id_;
             map_cloud_pub_.publish(map_msg);
         }
 
-        odom_sub_ = nh_.subscribe(odom_pose_topic_, 50,
-                                  &MapLocalizerNode::odomPoseCallback, this);
+        // source cloud와 odom pose(T_odom_lidar)를 message_filters로 짝지어 받는다.
+        // 예전에는 odom pose를 별도 구독해 버퍼에서 stamp로 찾고(±odom_stamp_tolerance),
+        // 못 찾으면 직전 값을 재사용했다. 부하로 pose 전달이 늦으면 정합은 정상인데
+        // 출력 T_map_lidar = T_map_odom * T_odom_lidar 가 그 자리에 고정되는 문제가 있었다
+        // (ROS2/Isaac attempt_2: ~1 s 고정 후 1.8 m 점프). ROS2 포팅본(2026-11-06)과 같은
+        // 구조로 맞춘다: 둘 다 도착한 프레임만 처리하고, 짝이 없으면 프레임을 누락시킨다.
+        odom_mf_sub_.subscribe(nh_, odom_pose_topic_, 50);
 
         if (source_mode_ == "features")
         {
-            plane_sub_.subscribe(nh_, plane_topic_, 2);
-            corner_sub_.subscribe(nh_, corner_topic_, 2);
+            plane_sub_.subscribe(nh_, plane_topic_, 5);
+            corner_sub_.subscribe(nh_, corner_topic_, 5);
             feature_sync_ = std::make_unique<FeatureSync>(
-                FeatureSyncPolicy(10), plane_sub_, corner_sub_);
-            feature_sync_->setMaxIntervalDuration(ros::Duration(0.05));
+                FeatureSyncPolicy(sync_queue_size_), plane_sub_, corner_sub_, odom_mf_sub_);
+            feature_sync_->setMaxIntervalDuration(ros::Duration(odom_sync_slop_sec_));
             feature_sync_->registerCallback(
-                boost::bind(&MapLocalizerNode::featureCallback, this, _1, _2));
+                boost::bind(&MapLocalizerNode::featureCallback, this, _1, _2, _3));
         }
         else
         {
-            // static / accumulated 모두 단일 토픽이라 sync 없이 그대로 받는다.
+            // static / accumulated: 단일 cloud 토픽 + odom pose
             const std::string &topic =
                 (source_mode_ == "static") ? static_topic_ : accumulated_topic_;
-            accumulated_sub_ = nh_.subscribe(topic, 2,
-                                             &MapLocalizerNode::accumulatedCallback, this);
+            cloud_mf_sub_.subscribe(nh_, topic, 5);
+            cloud_sync_ = std::make_unique<CloudSync>(
+                CloudSyncPolicy(sync_queue_size_), cloud_mf_sub_, odom_mf_sub_);
+            cloud_sync_->setMaxIntervalDuration(ros::Duration(odom_sync_slop_sec_));
+            cloud_sync_->registerCallback(
+                boost::bind(&MapLocalizerNode::cloudOdomCallback, this, _1, _2));
         }
+        // 수신/처리 프레임 수 진단용 (종료 시 로그). 동기화와 무관한 단순 카운터.
+        cloud_count_sub_ = nh_.subscribe<sensor_msgs::PointCloud2>(
+            (source_mode_ == "features") ? plane_topic_
+                : (source_mode_ == "static") ? static_topic_ : accumulated_topic_,
+            5,
+            [this](const sensor_msgs::PointCloud2::ConstPtr &) { ++clouds_received_; });
 
         ROS_INFO_STREAM("[map_localizer] matcher=" << matcher_type_
                         << ", source_mode=" << source_mode_
                         << ", map_points=" << map_cloud_->size()
-                        << " (leaf=" << map_voxel_leaf_ << ")");
+                        << " (leaf=" << map_voxel_leaf_ << ")"
+                        << ", sg_num_neighbors=" << sg_num_neighbors_);
     }
 
     ~MapLocalizerNode()
     {
+        ROS_INFO("[map_localizer] source clouds received=%zu, processed (synced with odom)=%zu",
+                 clouds_received_, clouds_processed_);
+        writeRunSummary();
         saveTrajectory();
+    }
+
+    // 종료 시 수신/처리 프레임 수를 CSV 옆 map_localizer_summary.txt 에 남긴다.
+    // ROS1에서는 destructor 시점의 ROS_INFO가 roslaunch 로그에 남지 않으므로(이미 shutdown 중)
+    // 파일로 쓴다. received == processed 이면 동기화로 누락된 프레임이 없다는 뜻이다.
+    void writeRunSummary() const
+    {
+        if (log_csv_path_.empty())
+            return;
+        const size_t slash = log_csv_path_.find_last_of('/');
+        const std::string dir =
+            (slash == std::string::npos) ? std::string(".") : log_csv_path_.substr(0, slash);
+        std::ofstream f((dir + "/map_localizer_summary.txt").c_str(), std::ios::out | std::ios::trunc);
+        if (!f.is_open())
+            return;
+        f << "source_clouds_received=" << clouds_received_ << '\n'
+          << "processed_synced_with_odom=" << clouds_processed_ << '\n';
     }
 
 private:
@@ -238,6 +298,10 @@ private:
         pnh_.param("init_yaw", init_yaw_, 0.0);
 
         pnh_.param("map_voxel_leaf", map_voxel_leaf_, 0.4);
+        // RViz 표시용 map_cloud 토픽 전용 축약. 정합에는 쓰이지 않는다.
+        // 정합용 0.25는 raw 맵에서 수천만 점이라 RViz가 못 버틴다.
+        // 0 = 축약 없이 정합 target을 그대로 발행(기존 동작).
+        pnh_.param("viz_voxel_leaf", viz_voxel_leaf_, 0.0);
         pnh_.param("source_voxel_leaf", source_voxel_leaf_, 0.0); // 0 = off
 
         // NDT
@@ -251,6 +315,11 @@ private:
         pnh_.param("sg_downsample_resolution", sg_downsample_resolution_, 0.25);
         pnh_.param("sg_max_corr_dist", sg_max_corr_dist_, 1.0);
         pnh_.param("sg_num_threads", sg_num_threads_, 4);
+        // 공분산 추정용 kNN 개수. preprocess_points의 라이브러리 기본값은 10,
+        // small_gicp의 KITTI odometry 벤치마크는 20을 쓴다(benchmark_odom.hpp).
+        // 고윳값은 (1e-3,1,1)로 정규화되어 버려지므로, 이 값이 정하는 건
+        // 지역 평면 '법선 방향'을 얼마나 넓은 이웃으로 평균 내느냐다.
+        pnh_.param("sg_num_neighbors", sg_num_neighbors_, 10);
         pnh_.param("sg_max_iterations", sg_max_iterations_, 20);
         pnh_.param("sg_voxel_resolution", sg_voxel_resolution_, 1.0); // VGICP 전용
 
@@ -258,8 +327,14 @@ private:
         pnh_.param("max_correction_trans", max_correction_trans_, 2.0);
         pnh_.param("max_correction_rot_deg", max_correction_rot_deg_, 10.0);
         pnh_.param("min_source_points", min_source_points_, 50);
+        // true 면 small_gicp 가 수렴 판정을 못 준 프레임도 버린다(예전 동작).
+        // false = small_gicp 원본에 가까운 동작.
+        pnh_.param("reject_on_not_converged", reject_on_not_converged_, false);
 
-        pnh_.param("odom_stamp_tolerance", odom_stamp_tolerance_, 0.2);
+        // cloud와 odom pose의 stamp 허용 차이. 둘 다 같은 입력 스캔의 stamp를 그대로 쓰므로
+        // 원래 0이어야 하고, 0.02 s는 여유값이다. (odom_stamp_tolerance는 더 이상 쓰지 않는다)
+        pnh_.param("odom_sync_slop_sec", odom_sync_slop_sec_, 0.02);
+        pnh_.param("sync_queue_size", sync_queue_size_, 20);
         pnh_.param<std::string>("log_csv_path", log_csv_path_, "");
         // 종료 시 추정 궤적을 PCD로 저장 (x y z intensity=frame index).
         // 교수님 결과(map_trajectory.pcd)와 동일 포맷이라 바로 겹쳐 비교할 수 있다.
@@ -273,7 +348,70 @@ private:
                                      "'features', 'static' or 'accumulated'.");
     }
 
-    // -------------------------------------------------------------------- map
+    // small_gicp 기반 복셀 축약. 반환 타입이 std::shared_ptr이라
+    // pcl::PointCloud::Ptr(PCL 1.10은 boost)과 다를 수 있어 swap으로 옮긴다.
+    CloudXYZ::Ptr downsample(const CloudXYZ::Ptr &in, double leaf) const
+    {
+        // small_gicp의 축약 함수는 PCL 1.11+ traits를 요구하거나(여긴 1.10)
+        // 지역 람다 템플릿 문제로 GCC 9에서 안 붙어서 여기 직접 구현한다.
+        // 방식은 small_gicp와 동일: 복셀 좌표를 축당 21bit로 64bit 키에 패킹한 뒤
+        // 정렬해서 같은 키끼리 평균낸다. PCL VoxelGrid처럼 dx*dy*dz 선형 인덱스를
+        // 만들지 않으므로 맵이 아무리 넓어도 int32 오버플로가 없다.
+        // 유효 범위는 축당 +-2^20 복셀 = 0.25 m에서 +-262 km.
+        constexpr std::int64_t kBits = 21;
+        constexpr std::int64_t kMask = (std::int64_t{1} << kBits) - 1;
+        constexpr std::int64_t kOff  = std::int64_t{1} << (kBits - 1);
+        const double inv = 1.0 / leaf;
+
+        std::vector<std::pair<std::uint64_t, std::uint32_t>> keys;
+        keys.reserve(in->size());
+        for (std::uint32_t i = 0; i < in->size(); ++i)
+        {
+            const auto &p = (*in)[i];
+            if (!pcl::isFinite(p))
+                continue;
+            const std::int64_t cx = std::llround(std::floor(p.x * inv)) + kOff;
+            const std::int64_t cy = std::llround(std::floor(p.y * inv)) + kOff;
+            const std::int64_t cz = std::llround(std::floor(p.z * inv)) + kOff;
+            if (cx < 0 || cx > kMask || cy < 0 || cy > kMask || cz < 0 || cz > kMask)
+                continue;   // 범위 밖은 버린다(small_gicp와 동일 동작)
+            keys.emplace_back(static_cast<std::uint64_t>(cx)
+                              | (static_cast<std::uint64_t>(cy) << kBits)
+                              | (static_cast<std::uint64_t>(cz) << (2 * kBits)), i);
+        }
+
+        std::sort(keys.begin(), keys.end(),
+                  [](const std::pair<std::uint64_t, std::uint32_t> &a,
+                     const std::pair<std::uint64_t, std::uint32_t> &b)
+                  { return a.first < b.first; });
+
+        CloudXYZ::Ptr out(new CloudXYZ());
+        out->reserve(keys.size() / 4 + 1);
+        for (size_t i = 0; i < keys.size();)
+        {
+            size_t j = i;
+            double sx = 0, sy = 0, sz = 0;
+            for (; j < keys.size() && keys[j].first == keys[i].first; ++j)
+            {
+                const auto &p = (*in)[keys[j].second];
+                sx += p.x; sy += p.y; sz += p.z;
+            }
+            const double n = static_cast<double>(j - i);
+            pcl::PointXYZ c;
+            c.x = static_cast<float>(sx / n);
+            c.y = static_cast<float>(sy / n);
+            c.z = static_cast<float>(sz / n);
+            out->push_back(c);
+            i = j;
+        }
+        out->width = out->size();
+        out->height = 1;
+        out->is_dense = true;
+        out->header = in->header;
+        return out;
+    }
+
+    // offline map 불러오기
     void loadMap()
     {
         map_cloud_.reset(new CloudXYZ()); // 안전장치 1
@@ -290,22 +428,23 @@ private:
             *map_cloud_ += tmp;
         }
 
+        // 다운샘플링. PCL VoxelGrid가 아니라 small_gicp를 쓴다.
+        // PCL은 (span_x/leaf)*(span_y/leaf)*(span_z/leaf) 를 int32 선형 인덱스로
+        // 만들기 때문에, 넓은 맵에서는 leaf가 작으면 곱이 2^31을 넘어
+        // "Leaf size is too small" 경고만 내고 축약을 통째로 건너뛴다.
+        // (raw LAS 맵 610x939x60 m @0.25 -> 2,198,928,000 > 2,147,483,647)
+        // small_gicp는 좌표를 축당 21bit로 비트 패킹하므로 곱이 생기지 않고
+        // 0.25 m에서 +-262 km까지 안전하다.
         if (map_voxel_leaf_ > 0.0)
-        {
-            pcl::VoxelGrid<pcl::PointXYZ> vg;
-            vg.setLeafSize(map_voxel_leaf_, map_voxel_leaf_, map_voxel_leaf_);
-            vg.setInputCloud(map_cloud_);
-            CloudXYZ::Ptr filtered(new CloudXYZ());
-            vg.filter(*filtered);
-            map_cloud_ = filtered;
-        }
+            map_cloud_ = downsample(map_cloud_, map_voxel_leaf_);
         if (map_cloud_->empty())
             throw std::runtime_error("[map_localizer] map cloud is empty.");
     }
 
+    // Matcher 초기화
     void initMatcher()
     {
-        if (matcher_type_ == "ndt")
+        if (matcher_type_ == "ndt") // NDT 세팅
         {
             ndt_.setResolution(ndt_resolution_);
             ndt_.setStepSize(ndt_step_size_);
@@ -315,7 +454,7 @@ private:
             return;
         }
 
-        // small_gicp: 맵은 한 번만 전처리해서 캐시
+        // small_gicp 세팅: 맵은 한 번만 전처리해서 캐시
         sg_setting_.type = parseSmallGicpType(matcher_type_);
         sg_setting_.downsampling_resolution = sg_downsample_resolution_;
         sg_setting_.max_correspondence_distance = sg_max_corr_dist_;
@@ -324,12 +463,14 @@ private:
         sg_setting_.voxel_resolution = sg_voxel_resolution_;
 
         const auto map_vec = cloudToVec4f(*map_cloud_);
+        // target인 offline map을 다운샘플링
         std::tie(sg_target_, sg_target_tree_) =
             small_gicp::preprocess_points(map_vec, sg_downsample_resolution_,
-                                          10, sg_num_threads_);
+                                          sg_num_neighbors_, sg_num_threads_);
 
-        // VGICP: target을 GaussianVoxelMap(복셀별 평균/공분산 해시맵)으로 미리 만들어
-        // 캐시한다. correspondence를 KD-tree NN이 아니라 voxel 해시 조회로 처리한다.
+        // Small-GICP 세팅
+        // VGICP: target을 GaussianVoxelMap(복셀별 평균/공분산 해시맵)으로 미리 만들어 캐시해둠
+        // 이때 correspondence를 KD-tree NN이 아니라 voxel 해시 조회로 처리한다.
         if (sg_setting_.type == small_gicp::RegistrationSetting::VGICP)
             sg_target_voxelmap_ =
                 small_gicp::create_gaussian_voxelmap(*sg_target_, sg_voxel_resolution_);
@@ -486,41 +627,19 @@ private:
         // src_points_used: 위 축약을 거쳐 실제로 정합에 들어간 점 수.
         log_ << "frame,stamp,matcher,source_mode,source_points,src_points_used,"
              << "map_points,map_prep_ms,"
-             << "x,y,z,roll,pitch,yaw,"
+             << "x,y,z,roll,pitch,yaw,rot_deg,"
              << "corr_dx,corr_dy,corr_dz,corr_dyaw,"
              << "fitness,converged,rejected,preprocess_ms,align_ms,total_ms\n";
         ROS_INFO_STREAM("[map_localizer] log: " << log_csv_path_);
     }
 
     // ------------------------------------------------------------- callbacks
-    void odomPoseCallback(const geometry_msgs::PoseStamped::ConstPtr &msg)
-    {
-        std::lock_guard<std::mutex> lk(odom_mutex_);
-        odom_buffer_.emplace_back(msg->header.stamp, poseMsgToIsometry(msg->pose));
-        while (odom_buffer_.size() > 500)
-            odom_buffer_.pop_front();
-    }
-
-    bool lookupOdomPose(const ros::Time &stamp, Eigen::Isometry3d &T_odom_lidar)
-    {
-        std::lock_guard<std::mutex> lk(odom_mutex_);
-        double best_dt = odom_stamp_tolerance_;
-        bool found = false;
-        for (const auto &entry : odom_buffer_)
-        {
-            const double dt = std::fabs((entry.first - stamp).toSec());
-            if (dt <= best_dt)
-            {
-                best_dt = dt;
-                T_odom_lidar = entry.second;
-                found = true;
-            }
-        }
-        return found;
-    }
-
+    // plane과 corenr 메세지를 각각 PCL로 변환 후 하나로 합침
+    // 현재 기하학적 특징 라벨을 사용하지 않기 때문
+    // odom pose는 message_filters로 같은 stamp의 것이 함께 들어온다.
     void featureCallback(const sensor_msgs::PointCloud2::ConstPtr &plane_msg,
-                         const sensor_msgs::PointCloud2::ConstPtr &corner_msg)
+                         const sensor_msgs::PointCloud2::ConstPtr &corner_msg,
+                         const geometry_msgs::PoseStamped::ConstPtr &odom_msg)
     {
         CloudXYZ::Ptr source(new CloudXYZ());
         CloudXYZ tmp;
@@ -529,19 +648,26 @@ private:
         tmp.clear();
         pcl::fromROSMsg(*corner_msg, tmp);
         *source += tmp;
-        process(source, plane_msg->header.stamp);
+        process(source, plane_msg->header.stamp, poseMsgToIsometry(odom_msg->pose));
     }
 
-    void accumulatedCallback(const sensor_msgs::PointCloud2::ConstPtr &msg)
+    // static: online static feature node의 정적 point / accumulated: raw dense window
+    // odom pose는 message_filters로 같은 stamp의 것이 함께 들어온다.
+    void cloudOdomCallback(const sensor_msgs::PointCloud2::ConstPtr &msg,
+                           const geometry_msgs::PoseStamped::ConstPtr &odom_msg)
     {
         CloudXYZ::Ptr source(new CloudXYZ());
         pcl::fromROSMsg(*msg, *source);
-        process(source, msg->header.stamp);
+        process(source, msg->header.stamp, poseMsgToIsometry(odom_msg->pose));
     }
 
-    // ------------------------------------------------------------------ core
-    void process(CloudXYZ::Ptr source, const ros::Time &stamp)
+    // 핵심 처리 함수
+    // 모든 source mode (static or accumulated)는 최종적으로 이 함수로 들어옴
+    // T_odom_lidar: source cloud와 같은 stamp의 scan matching odometry (동기화되어 전달됨)
+    void process(CloudXYZ::Ptr source, const ros::Time &stamp,
+                 const Eigen::Isometry3d &T_odom_lidar)
     {
+        ++clouds_processed_;
         if (static_cast<int>(source->size()) < min_source_points_)
         {
             ROS_WARN_THROTTLE(5.0, "[map_localizer] source too small (%zu pts)",
@@ -549,6 +675,7 @@ private:
             return;
         }
 
+        // Source 다운샘플링
         if (source_voxel_leaf_ > 0.0)
         {
             pcl::VoxelGrid<pcl::PointXYZ> vg;
@@ -559,17 +686,8 @@ private:
             source = filtered;
         }
 
-        Eigen::Isometry3d T_odom_lidar = Eigen::Isometry3d::Identity();
-        const bool has_odom = lookupOdomPose(stamp, T_odom_lidar);
-        if (!has_odom)
-            ROS_WARN_THROTTLE(5.0, "[map_localizer] no odom pose near stamp; "
-                                   "using last known T_odom_lidar.");
-        if (has_odom)
-            last_T_odom_lidar_ = T_odom_lidar;
-        else
-            T_odom_lidar = last_T_odom_lidar_;
-
-        // 초기화: T_map_odom = T_map_lidar(init) * T_odom_lidar^-1
+        // 최초 T_map_odom 초기화: 사용자가 지정한 초기 map pose를 만듦 
+        // T_map_odom = T_map_lidar(init) * T_odom_lidar^-1
         if (!initialized_)
         {
             Eigen::Isometry3d T_map_lidar_init = Eigen::Isometry3d::Identity();
@@ -584,6 +702,8 @@ private:
             initialized_ = true;
         }
 
+        // Initial guess 설정
+        // 매 프레임 직전에 성공했던 T_map_odom을 다음 map matching의 초기값으로 사용
         const Eigen::Isometry3d prediction = T_map_odom_;
 
         double fitness = -1.0;
@@ -598,6 +718,7 @@ private:
         size_t src_points_used = source->size();
 
         const auto t0 = SteadyClock::now();
+        // Map matching 실행
         if (matcher_type_ == "ndt")
             converged = alignNdt(source, prediction, T_map_odom_new, fitness);
         else
@@ -606,12 +727,16 @@ private:
         const double total_ms = elapsedMs(t0, SteadyClock::now());
         const double align_ms = total_ms - preprocess_ms;
 
-        // Gating: odometry 예측 대비 보정량 제한
+        // Gating: odometry 예측 대비 보정량 제한 - map matching 오차로 인해 확 튀어서 발산하는 것 방지
         const Eigen::Isometry3d delta = prediction.inverse() * T_map_odom_new;
         const double corr_trans = delta.translation().norm();
         const double corr_rot_deg =
             Eigen::AngleAxisd(delta.linear()).angle() * 180.0 / M_PI;
-        const bool rejected = (!converged) ||
+        // small_gicp 의 converged 는 "마지막 갱신량이 eps 아래였나"일 뿐이라
+        // 정합 품질과 무관하다. 원저자의 KITTI odometry 벤치마크도 이 값을 보지 않고
+        // result.T_target_source 를 그대로 누적한다. 그래서 기본값은 무시(false)다.
+        // 게이팅(맵의 엉뚱한 곳으로 튀는 것 차단)만 남긴다.
+        const bool rejected = (reject_on_not_converged_ && !converged) ||
                               corr_trans > max_correction_trans_ ||
                               corr_rot_deg > max_correction_rot_deg_;
         if (!rejected)
@@ -626,6 +751,7 @@ private:
                       preprocess_ms, align_ms, total_ms, src_points_used);
     }
 
+    // NDT일때 map matching 함수
     bool alignNdt(const CloudXYZ::Ptr &source,
                   const Eigen::Isometry3d &guess,
                   Eigen::Isometry3d &result, double &fitness)
@@ -638,6 +764,7 @@ private:
         return ndt_.hasConverged();
     }
 
+    // Small-GICP일때 map matching 함수
     bool alignSmallGicp(const CloudXYZ::Ptr &source,
                         const Eigen::Isometry3d &guess,
                         Eigen::Isometry3d &result, double &fitness,
@@ -647,7 +774,7 @@ private:
         const auto source_vec = cloudToVec4f(*source);
         auto [sg_source, sg_source_tree] =
             small_gicp::preprocess_points(source_vec, sg_downsample_resolution_,
-                                          10, sg_num_threads_);
+                                          sg_num_neighbors_, sg_num_threads_);
         preprocess_ms = elapsedMs(t_pre, SteadyClock::now());
         src_points_used = sg_source->size();
         (void)sg_source_tree;
@@ -669,6 +796,7 @@ private:
         return res.converged;
     }
 
+    // 최종 pose 계산 & 출력
     void publishAndLog(const CloudXYZ::Ptr &source, const ros::Time &stamp,
                        const Eigen::Isometry3d &T_odom_lidar,
                        const Eigen::Isometry3d &prediction,
@@ -677,6 +805,7 @@ private:
                        size_t src_points_used)
     {
         frame_count_++;
+        // 스캔 매칭으로 구한 오도메트리 pose에 맵 매칭으로 구한 최종 변환을 곱해서 map pose를 구함
         const Eigen::Isometry3d T_map_lidar = T_map_odom_ * T_odom_lidar;
 
         // 궤적 누적: intensity에 frame index를 담아 시간 순서를 남긴다.
@@ -693,7 +822,8 @@ private:
         map_pose_pub_.publish(isometryToPoseMsg(T_map_lidar, stamp, map_frame_id_));
         map_odom_pub_.publish(isometryToPoseMsg(T_map_odom_, stamp, map_frame_id_));
 
-        if (publish_tf_)
+        // 오도메트리 좌표계의 accumulator / feature cloud를 Rviz의 맵 프레임에서 볼 수 있음
+        if (publish_tf_) // map -> odom TF 발행
         {
             geometry_msgs::TransformStamped tf_msg;
             tf_msg.header.stamp = stamp;
@@ -717,6 +847,8 @@ private:
 
         publishPathAndMarkers(T_map_lidar, stamp, rejected);
 
+        // 입력 source에 T_map_odom을 적용하여 map 좌표계로 옮긴 디버깅용 cloud
+        // 이 cloud가 map_cloud와 잘 겹치는지 확인하여 map matching을 시각적으로 체크할 수 있음
         if (aligned_pub_.getNumSubscribers() > 0)
         {
             CloudXYZ aligned;
@@ -744,6 +876,8 @@ private:
              << T_map_lidar.translation().y() << ','
              << T_map_lidar.translation().z() << ','
              << roll << ',' << pitch << ',' << yaw << ','
+             // 오일러 표기와 무관한 절대 회전량. 이 값이 진짜 자세 크기다.
+             << Eigen::AngleAxisd(T_map_lidar.linear()).angle() * 180.0 / M_PI << ','
              << delta.translation().x() << ','
              << delta.translation().y() << ','
              << delta.translation().z() << ','
@@ -758,15 +892,24 @@ private:
     ros::NodeHandle nh_;
     ros::NodeHandle pnh_;
 
+    // features: plane + corner + odom pose
     using FeatureSyncPolicy = message_filters::sync_policies::ApproximateTime<
-        sensor_msgs::PointCloud2, sensor_msgs::PointCloud2>;
+        sensor_msgs::PointCloud2, sensor_msgs::PointCloud2, geometry_msgs::PoseStamped>;
     using FeatureSync = message_filters::Synchronizer<FeatureSyncPolicy>;
+    // static / accumulated: cloud + odom pose
+    using CloudSyncPolicy = message_filters::sync_policies::ApproximateTime<
+        sensor_msgs::PointCloud2, geometry_msgs::PoseStamped>;
+    using CloudSync = message_filters::Synchronizer<CloudSyncPolicy>;
 
     message_filters::Subscriber<sensor_msgs::PointCloud2> plane_sub_;
     message_filters::Subscriber<sensor_msgs::PointCloud2> corner_sub_;
+    message_filters::Subscriber<sensor_msgs::PointCloud2> cloud_mf_sub_;
+    message_filters::Subscriber<geometry_msgs::PoseStamped> odom_mf_sub_;
     std::unique_ptr<FeatureSync> feature_sync_;
-    ros::Subscriber accumulated_sub_;
-    ros::Subscriber odom_sub_;
+    std::unique_ptr<CloudSync> cloud_sync_;
+    ros::Subscriber cloud_count_sub_;
+    size_t clouds_received_ = 0;
+    size_t clouds_processed_ = 0;
 
     ros::Publisher map_pose_pub_;
     ros::Publisher map_odom_pub_;
@@ -789,19 +932,25 @@ private:
     bool publish_tf_ = true;
     tf2_ros::TransformBroadcaster tf_broadcaster_;
 
+    // 화살표 마커를 진행 방향으로 그리기 위한 상태 (시각화 전용)
+
     double init_x_ = 0, init_y_ = 0, init_z_ = 0;
     double init_roll_ = 0, init_pitch_ = 0, init_yaw_ = 0;
 
     double map_voxel_leaf_ = 0.4;
+    double viz_voxel_leaf_ = 0.0;
     double source_voxel_leaf_ = 0.0;
     double ndt_resolution_ = 1.0, ndt_step_size_ = 0.1, ndt_trans_eps_ = 0.01;
     int ndt_max_iterations_ = 50;
     double sg_downsample_resolution_ = 0.25, sg_max_corr_dist_ = 1.0;
     int sg_num_threads_ = 4, sg_max_iterations_ = 20;
+    int sg_num_neighbors_ = 10;
     double sg_voxel_resolution_ = 1.0;
     double max_correction_trans_ = 2.0, max_correction_rot_deg_ = 10.0;
+    bool reject_on_not_converged_ = false;
     int min_source_points_ = 50;
-    double odom_stamp_tolerance_ = 0.2;
+    double odom_sync_slop_sec_ = 0.02;
+    int sync_queue_size_ = 20;
 
     CloudXYZ::Ptr map_cloud_;
     pcl::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> ndt_;
@@ -809,10 +958,6 @@ private:
     small_gicp::PointCloud::Ptr sg_target_;
     std::shared_ptr<small_gicp::KdTree<small_gicp::PointCloud>> sg_target_tree_;
     small_gicp::GaussianVoxelMap::Ptr sg_target_voxelmap_;  // VGICP 전용 캐시
-
-    std::mutex odom_mutex_;
-    std::deque<std::pair<ros::Time, Eigen::Isometry3d>> odom_buffer_;
-    Eigen::Isometry3d last_T_odom_lidar_ = Eigen::Isometry3d::Identity();
 
     Eigen::Isometry3d T_map_odom_ = Eigen::Isometry3d::Identity();
     bool initialized_ = false;
