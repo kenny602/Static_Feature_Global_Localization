@@ -91,20 +91,72 @@ def with_suffix(base, suffix):
     return f"{stem}{suffix}{ext}"
 
 
+def find_suffixes(output_dir):
+    """디렉토리에 실제로 있는 map_localizer*.csv 의 접미사 목록."""
+    stem, ext = os.path.splitext(LOC_FILE)
+    found = []
+    for name in sorted(os.listdir(output_dir)):
+        if name.startswith(stem) and name.endswith(ext):
+            found.append(name[len(stem):len(name) - len(ext)])
+    return found
+
+
+def resolve_suffix(output_dir, suffix):
+    """이 디렉토리에서 실제로 쓸 접미사를 정한다. 못 정하면 None.
+
+    접미사 붙은 파일을 우선하되 없으면 접미사 없는 이름으로 떨어지고,
+    그것도 없으면 디렉토리에 실제로 있는 map_localizer*.csv 를 찾아 쓴다.
+    머신·실행마다 접미사가 제각각(_3frame, _3frame_병렬처리, _success)인데
+    --suffix 는 전역이라, 자동 탐색이 없으면 디렉토리마다 따로 돌려야 한다.
+    후보가 둘 이상이면 고르지 않고 목록만 보여준다.
+    """
+    if not os.path.isdir(output_dir):
+        return None
+    if os.path.isfile(os.path.join(output_dir, with_suffix(LOC_FILE, suffix))):
+        return suffix
+    if suffix and os.path.isfile(os.path.join(output_dir, LOC_FILE)):
+        return ""
+    found = find_suffixes(output_dir)
+    if len(found) == 1:
+        return found[0]
+    if len(found) > 1:
+        print(f"[skip] {output_dir}: 후보가 여러 개다. --suffix 로 하나 골라라 → "
+              + ", ".join(repr(s) for s in found), file=sys.stderr)
+    return None
+
+
 def merge_one(output_dir, tol=STAMP_TOL, suffix=""):
-    loc_name = with_suffix(LOC_FILE, suffix)
+    eff = resolve_suffix(output_dir, suffix)
+    if eff is None:
+        if os.path.isdir(output_dir) and not find_suffixes(output_dir):
+            print(f"[skip] {output_dir}: {LOC_FILE} 계열 파일이 없다", file=sys.stderr)
+        elif not os.path.isdir(output_dir):
+            print(f"[skip] {output_dir}: 디렉토리가 없다", file=sys.stderr)
+        return None
+    if eff != suffix:
+        print(f"[suffix] {output_dir}: '{suffix}' 파일이 없어 '{eff}' 를 쓴다")
+
+    loc_name = with_suffix(LOC_FILE, eff)
     loc_rows = read_csv(os.path.join(output_dir, loc_name))
     if not loc_rows:
         print(f"[skip] {output_dir}: {loc_name} 없음 또는 비어 있음", file=sys.stderr)
         return None
 
-    acc_rows = read_csv(os.path.join(output_dir, with_suffix(ACC_FILE, suffix)))
-    feat_rows = read_csv(os.path.join(output_dir, with_suffix(FEAT_FILE, suffix)))
+    acc_rows = read_csv(os.path.join(output_dir, with_suffix(ACC_FILE, eff)))
+    feat_rows = read_csv(os.path.join(output_dir, with_suffix(FEAT_FILE, eff)))
 
     acc_stamps, acc_data = build_index(acc_rows, "msg_stamp_sec")
     feat_stamps, feat_data = build_index(feat_rows, "msg_stamp_sec")
 
-    has_feature = feat_rows is not None
+    # source_mode=accumulated 는 feature 추출 자체를 안 거친다. 그런데 같은
+    # 디렉토리에 앞선 features 실행의 feature_latency.csv 가 남아 있으면
+    # stamp 가 겹쳐 조인돼 없던 비용이 붙는다. 행의 source_mode 를 믿는다.
+    modes = {r.get("source_mode", "") for r in loc_rows}
+    accumulated_only = modes and modes <= {"accumulated"}
+    has_feature = feat_rows is not None and not accumulated_only
+    if feat_rows is not None and accumulated_only:
+        print(f"     주의: source_mode=accumulated 라 {with_suffix(FEAT_FILE, eff)} 는 "
+              "이번 실행 것이 아니다 → 무시한다")
     out_rows = []
     unmatched_acc = 0
     unmatched_feat = 0
@@ -168,7 +220,7 @@ def merge_one(output_dir, tol=STAMP_TOL, suffix=""):
             "rejected": lr.get("rejected", ""),
         })
 
-    out_path = os.path.join(output_dir, with_suffix(OUT_FILE, suffix))
+    out_path = os.path.join(output_dir, with_suffix(OUT_FILE, eff))
     with open(out_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(out_rows[0].keys()))
         w.writeheader()
@@ -176,7 +228,7 @@ def merge_one(output_dir, tol=STAMP_TOL, suffix=""):
 
     print(f"[ok] {out_path}  ({len(out_rows)} frames, stamp 최대 오차 {max_dt*1000:.2f} ms)")
     if not has_feature:
-        print("     feature_latency.csv 없음 → feature_extract_ms = 0 "
+        print("     feature_extract_ms = 0 "
               "(source_mode=accumulated: 추출 비용 자체가 없음)")
     if unmatched_acc:
         print(f"     경고: accumulator 미매칭 {unmatched_acc}/{len(out_rows)} 프레임",

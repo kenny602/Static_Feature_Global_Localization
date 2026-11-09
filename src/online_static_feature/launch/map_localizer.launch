@@ -19,18 +19,35 @@
              output_dir:=/.../raw_1frame_ndt
        ===================================================================== -->
 
+  <!-- 초기 pose. -1 이면 yaml(localization_las.yaml) 값을 그대로 쓴다.
+       run_las_eval.sh 가 트랙에 맞는 값을 넘겨준다. -->
+  <arg name="init_x"   default="-99999" />
+  <arg name="init_y"   default="-99999" />
+  <arg name="init_z"   default="-99999" />
+  <arg name="init_yaw" default="-99999" />
+
   <arg name="source_mode"  default="static" />  <!-- features | static | accumulated -->
   <arg name="matcher_type" default="vgicp" />        <!-- ndt | gicp | vgicp | icp | plane_icp -->
+  <!-- feature 추출 좌표계. 비워 두면(기본) config yaml 의 extract_in_map_frame 값을 그대로 쓴다.
+       true/false 를 주면 yaml 값을 덮어쓴다. 설명은 config/localization.yaml 참고. -->
+  <arg name="extract_in_map_frame" default="" />
+  <!-- <arg name="output_dir"
+       default="/home/rain/online_static_feature_ws/output/map_localizer/ETRI_LAS_EVAL/static_point/small_gicp/TRACK024/3frame/chunk08_50cm" /> -->
   <arg name="output_dir"
-       default="/home/rain/online_static_feature_ws/output/map_localizer/ETRI_노은역/static_point/small_gicp" />
+       default="/home/rain/online_static_feature_ws/output/map_localizer/ETRI_노은역/forICRA/static_point" />
+
+  <!-- 데이터셋별 설정 파일. bag(노은역) = localization.yaml,
+       LAS 트랙 평가 = localization_las.yaml (input_topic 과 map_pcd_path 가 다르다).
+       run_las_eval.sh 가 config:=localization_las.yaml 로 넘긴다. -->
+  <arg name="config" default="localization.yaml" />
 
   <rosparam command="load"
-            file="$(find online_static_feature)/config/localization.yaml" />
+            file="$(find online_static_feature)/config/$(arg config)" />
 
   <!-- scan matching odometry: 세 조건 공통 -->
   <node pkg="online_static_feature" type="scan_matching_accumulator_node"
         name="scan_matching_accumulator_node" output="screen">
-    <param name="latency_log_path" value="$(arg output_dir)/accumulator_latency_3frame_병렬처리.csv" />
+    <param name="latency_log_path" value="$(arg output_dir)/accumulator_latency.csv" />
   </node>
 
   <!-- static feature 추출: accumulated 조건에서는 기동하지 않는다.
@@ -47,7 +64,11 @@
     <!-- features일 때만 PLANAR/CORNER 분류 수행 -->
     <param name="use_feature_classification"
            value="$(eval 1 if source_mode == 'features' else 0)" />
-    <param name="latency_log_path" value="$(arg output_dir)/feature_latency_3frame_병렬처리.csv" />
+    <!-- arg 를 준 경우에만 yaml 값을 덮어쓴다 (init_x 의 -99999 와 같은 방식).
+         launch 의 param 은 rosparam load 보다 우선하므로, 무조건 쓰면 yaml 편집이 무시된다. -->
+    <param name="extract_in_map_frame" value="$(arg extract_in_map_frame)"
+           unless="$(eval extract_in_map_frame == '')" />
+    <param name="latency_log_path" value="$(arg output_dir)/feature_latency.csv" />
   </node>
 
   <!-- scan-to-map localization -->
@@ -55,7 +76,12 @@
         name="map_localizer" output="screen">
     <param name="matcher_type" value="$(arg matcher_type)" />
     <param name="source_mode"  value="$(arg source_mode)" />
-    <param name="log_csv_path"  value="$(arg output_dir)/map_localizer_3frame_병렬처리.csv" />
-    <param name="traj_pcd_path" value="$(arg output_dir)/map_localizer_3frame_병렬처리.pcd" />
+    <!-- rosparam 으로 로드된 yaml 값을 param 이 덮어쓴다(-99999 면 건드리지 않음) -->
+    <param name="init_x"   value="$(arg init_x)"   unless="$(eval init_x   == -99999)" />
+    <param name="init_y"   value="$(arg init_y)"   unless="$(eval init_y   == -99999)" />
+    <param name="init_z"   value="$(arg init_z)"   unless="$(eval init_z   == -99999)" />
+    <param name="init_yaw" value="$(arg init_yaw)" unless="$(eval init_yaw == -99999)" />
+    <param name="log_csv_path"  value="$(arg output_dir)/map_localizer.csv" />
+    <param name="traj_pcd_path" value="$(arg output_dir)/map_localizer.pcd" />
   </node>
 </launch>

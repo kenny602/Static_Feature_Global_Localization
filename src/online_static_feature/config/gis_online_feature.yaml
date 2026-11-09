@@ -10,7 +10,7 @@ floor_z_percentile: 10.0
 floor_ransac_thresh: 0.05
 floor_ransac_iters: 1000
 
-voxel_size: 0.2
+voxel_size: 0.5
 n_voxel_min: 3
 n_pillar_min: 3
 
@@ -36,15 +36,16 @@ phi_mean_thresh: 0.4
 phi_std_thresh: 0.4
 
 # s_thresh: 0.0005
-s_thresh: 0.0015
+# s_thresh: 0.0015
+s_thresh: 0.005 # LAS map / ETRI bag
 
 # Pillar 내 복셀들의 normal 경향성을 통한 feature 분류
 use_weight: 1        # n_bar 및 theta mean/std에 복셀 포인트 수 기반 가중치 적용
 n_ref: 50.0           # 복셀 내 포인트가 이 값이면 weight ≈ 0.95
 # mu_thresh: 0.4        # 라디안
 # sigma_thresh: 0.45     # 라디안
-mu_thresh: 0.5        # 라디안
-sigma_thresh: 0.5     # 라디안
+mu_thresh: 0.4        # 라디안
+sigma_thresh: 0.4     # 라디안
 
 use_voxel_corner: 1
 corner_multiplier: 15.0
@@ -62,7 +63,7 @@ use_feature_classification: 0
 # Planar(surface) feature voxel-filter 다운샘플 (KD-Tree 입력용, LSMCL 수식 17 관점)
 # corner는 손대지 않고 planar 점만 voxel당 centroid 1점으로 축약.
 # per-window(merge 전) 적용이라 작은 leaf(≤0.05m)에서도 VoxelGrid 오버플로 없음.
-use_planar_downsample: 1     # 0/1 기능 on/off
+use_planar_downsample: 0     # 0/1 기능 on/off
 planar_leaf: 0.1            # [m] surface 다운샘플 복셀 크기 (예: 5cm)
 
 # Corner distance-spacing 다운샘플 (LSMCL Eq.3 d_c와 동일)
@@ -82,6 +83,6 @@ origin_las_path: /home/rain/data/국토부_GIS_map/20250730072521533_gps_sorted.
 # Accumulated colored online feature map.
 publish_feature_history: false
 feature_history_topic: feature_map_colored
-save_on_shutdown_pcd: true
+save_on_shutdown_pcd: false
 save_feature_history_path: /home/rain/online_static_feature_ws/output/pcd_map/online_static_features_20cm복셀.pcd
 max_feature_history_points: 200000000

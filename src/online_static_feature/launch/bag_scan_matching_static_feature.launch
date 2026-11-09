@@ -2,10 +2,12 @@
   <arg name="input_topic" default="/ouster/points" />
   <arg name="odom_frame" default="odom" />
 
-  <arg name="accumulator_window_frames" default="1" />
+  <!-- window 내 누적할 프레임 수 -->
+  <arg name="accumulator_window_frames" default="3" />
+  <!-- 스캔 매칭하는 프레임 수 -->
   <arg name="accumulator_submap_frames" default="1" />
   <arg name="accumulator_publish_every_n_frames" default="1" />
-  <arg name="accumulator_publish_only_full_window" default="true" />
+  <arg name="accumulator_publish_only_full_window" default="false" />
   <arg name="accumulator_latency_log_enabled" default="false" />
   <arg name="accumulator_latency_log_path"
        default="/home/rain/online_static_feature_ws/output/latency_csv/ETRI_노은역/nRef50_1frame_accumulator.csv" />
@@ -19,7 +21,7 @@
   <arg name="feature_window_frames" default="1" />
   <arg name="feature_publish_every_n_frames" default="1" />
   <!-- 0 = PLANAR/CORNER 분류 생략, scan_static_features 단일 토픽 발행 -->
-  <arg name="use_feature_classification" default="1" />
+  <arg name="use_feature_classification" default="0" />
   <arg name="publish_feature_history" default="false" />
   <arg name="save_on_shutdown_pcd" default="false" />
   <arg name="save_feature_history_path"
