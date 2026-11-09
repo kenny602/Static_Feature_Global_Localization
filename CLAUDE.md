@@ -82,14 +82,20 @@ GT 없음 → precision-only 평가로 확정.
 - **fitness 분포 안정성**: 정합 residual의 평균/분산.
 - 보조: 프레임당 처리시간(정적 feature의 경량성 증거).
 
-### 2.3 Ablation 매트릭스 (2×2, 확장 가능)
+### 2.3 비교 조건: 2조건으로 확정 (2026-11-09)
 
-- **축 1 (source_mode)**: `accumulated`(raw dense window, baseline) vs.
-  `features`(정적 feature, 제안)
-- **축 2 (matcher_type)**: `ndt` vs. `gicp`/`vgicp`(small_gicp) — backend
-  무관하게 정적 feature가 유리함을 보이기 위해 2개 backend로 검증
-- primitive matcher가 future work로 빠졌으므로 이 2×2가 최종 실험 범위.
-  (예전엔 여기에 `primitive` 축 추가를 계획했으나 확정 스코프에서 제외됨)
+- **방법 적용(ON)**: `source_mode=static`(정적 feature 스캔, feature window 3)
+  + static feature 맵(surface+corner)
+- **방법 미적용(OFF, baseline)**: `source_mode=accumulated`(raw 스캔, window 1)
+  + raw 맵
+- matcher는 `vgicp` 단일. 예전 2×2 설계(source_mode × matcher_type: ndt vs
+  vgicp)는 폐기. 노은역 precision 실험과 Isaac 정확도 실험 모두 이 2조건으로
+  보고한다. 시나리오별 trajectory 그림도 2조건만 그린다.
+- 코드의 `features`(plane/corner 분리 발행) 모드와 feature node의
+  `extract_in_map_frame` 스위치는 남아 있지만 실험 조건에 넣지 않는다.
+  (`extract_in_map_frame=true`는 노은역 full-bag A/B에서 fitness 0.24→0.31로
+  나빠져 기본값 false 유지. 등속도 예측 수정은 결과를 바꾸지 않았음.)
+- primitive matcher는 future work (이전 결정 유지).
 
 ### 2.4 Isaac Sim 기반 정확도(accuracy) 평가 (ROS 2 Jazzy, MAV_Localizer)
 
@@ -148,7 +154,13 @@ ROS 2로 포팅한 `MAV_Localizer` 워크스페이스를 만들었다.
   스크립트를 만든다. 시각은 `map_localizer.csv`의 `stamp`와 같은 기준(sim time)으로 맞춘다.
 - Isaac Sim은 자세 GT도 있으므로, `run_evo.sh`의 `-r trans_part`(위치만)에 더해
   회전 오차(`-r full` 또는 `angle_deg`)도 평가할 수 있다.
-- 비교 조건은 2.3의 2×2 ablation(source_mode × matcher_type)을 그대로 적용한다.
+- 비교 조건은 2.3의 2조건(방법 적용 vs 미적용, vgicp)을 그대로 적용한다.
+- **현재 상태 (2026-11-09)**: attempt_1~10 실험 완료. odom pose 비동기 버그 수정
+  (3.3절) 후 결과가 최종: 위치 RMSE raw_dyn 0.0857 m vs mav_sta 0.0722 m
+  (−16 %, 10 bag 중 9개 우세, 최대오차 0.52→0.39 m). 수정 전 수치(0.158/0.084,
+  "47 %")는 frozen 프레임으로 부풀려진 것이므로 인용하지 말 것. 데이터·스크립트·
+  결과 세대 구분은 `isaac_data/HANDOFF_PROMPT.md` 참고. 남은 일: 조건당 반복
+  실행(초기 pose perturbation)으로 분산 확보.
 
 ---
 
@@ -247,6 +259,12 @@ voxel(0.1~0.2m) → 같은 (i,j) voxel을 pillar로 묶어 판정. 동적/비정
 - corner: `/online_static_feature_node/scan_corner_features`
 - accumulated: `/online_static_feature_node/accumulated_cloud`
 - odom pose: `/scan_matching_accumulator_node/scan_matching_pose`
+  → **source cloud와 message_filters(ApproximateTime, slop 0.02 s)로 짝지어
+  받는다** (ROS2 2026-11-06, ROS1 2026-11-09 포팅). 예전의 "버퍼에서 stamp
+  검색, 실패 시 직전 pose 재사용" 방식은 부하로 pose가 늦으면 출력 자세가
+  ~1 s 고정되는 버그(Isaac attempt_2)가 있어 제거. 짝 없는 프레임은 누락되며,
+  종료 시 received/processed 수를 로그(ROS2)·`map_localizer_summary.txt`(ROS1)로
+  남긴다. 두 수가 같으면 누락 없음.
 
 **첫 검증 절차 (self-localization)**: map을 생성한 바로 그 bag으로
 localizer를 돌려 T_map_odom이 identity 근처에서 안정적인지 확인 → 통과 후
