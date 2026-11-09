@@ -21,16 +21,27 @@
 
   <!-- 초기 pose. -1 이면 yaml(localization_las.yaml) 값을 그대로 쓴다.
        run_las_eval.sh 가 트랙에 맞는 값을 넘겨준다. -->
-  <arg name="init_x"   default="-99999" />
-  <arg name="init_y"   default="-99999" />
-  <arg name="init_z"   default="-99999" />
-  <arg name="init_yaw" default="-99999" />
+  <arg name="init_x"     default="-99999" />
+  <arg name="init_y"     default="-99999" />
+  <arg name="init_z"     default="-99999" />
+  <arg name="init_roll"  default="-99999" />
+  <arg name="init_pitch" default="-99999" />
+  <arg name="init_yaw"   default="-99999" />
+
+  <!-- 맵과 feature window를 실행마다 바꾸기 위한 인자 (Isaac 2조건 실험용).
+       비워 두면 yaml 값을 쓴다. map_pcd_path를 주면 map_pcd_path2도 함께 덮어쓴다
+       (비우면 맵 1개). ROS2 포팅본 launch.py와 같은 규칙. -->
+  <arg name="map_pcd_path"          default="" />
+  <arg name="map_pcd_path2"         default="" />
+  <arg name="feature_window_frames" default="" />
 
   <arg name="source_mode"  default="static" />  <!-- features | static | accumulated -->
   <arg name="matcher_type" default="vgicp" />        <!-- ndt | gicp | vgicp | icp | plane_icp -->
   <!-- feature 추출 좌표계. 비워 두면(기본) config yaml 의 extract_in_map_frame 값을 그대로 쓴다.
        true/false 를 주면 yaml 값을 덮어쓴다. 설명은 config/localization.yaml 참고. -->
   <arg name="extract_in_map_frame" default="" />
+  <!-- odom | map_init | map_live. 비워 두면 yaml 의 extract_frame 값을 쓴다. -->
+  <arg name="extract_frame" default="" />
   <!-- <arg name="output_dir"
        default="/home/rain/online_static_feature_ws/output/map_localizer/ETRI_LAS_EVAL/static_point/small_gicp/TRACK024/3frame/chunk08_50cm" /> -->
   <arg name="output_dir"
@@ -40,6 +51,8 @@
        LAS 트랙 평가 = localization_las.yaml (input_topic 과 map_pcd_path 가 다르다).
        run_las_eval.sh 가 config:=localization_las.yaml 로 넘긴다. -->
   <arg name="config" default="localization.yaml" />
+  <!-- feature 추출 알고리즘 설정 파일. Isaac 창고 = gis_isaac_feature.yaml (voxel 0.25 m). -->
+  <arg name="feature_config" default="gis_online_feature.yaml" />
 
   <rosparam command="load"
             file="$(find online_static_feature)/config/$(arg config)" />
@@ -57,7 +70,7 @@
         pkg="online_static_feature" type="online_static_feature_node"
         name="online_static_feature_node" output="screen">
     <rosparam command="load"
-              file="$(find online_static_feature)/config/gis_online_feature.yaml" />
+              file="$(find online_static_feature)/config/$(arg feature_config)" />
     <param name="local_origin_mode" value="none" />
     <param name="publish_feature_history" value="false" />
     <param name="save_on_shutdown_pcd" value="false" />
@@ -68,6 +81,10 @@
          launch 의 param 은 rosparam load 보다 우선하므로, 무조건 쓰면 yaml 편집이 무시된다. -->
     <param name="extract_in_map_frame" value="$(arg extract_in_map_frame)"
            unless="$(eval extract_in_map_frame == '')" />
+    <param name="extract_frame" value="$(arg extract_frame)"
+           unless="$(eval extract_frame == '')" />
+    <param name="window_frames" value="$(arg feature_window_frames)"
+           unless="$(eval feature_window_frames == '')" />
     <param name="latency_log_path" value="$(arg output_dir)/feature_latency.csv" />
   </node>
 
@@ -77,10 +94,14 @@
     <param name="matcher_type" value="$(arg matcher_type)" />
     <param name="source_mode"  value="$(arg source_mode)" />
     <!-- rosparam 으로 로드된 yaml 값을 param 이 덮어쓴다(-99999 면 건드리지 않음) -->
-    <param name="init_x"   value="$(arg init_x)"   unless="$(eval init_x   == -99999)" />
-    <param name="init_y"   value="$(arg init_y)"   unless="$(eval init_y   == -99999)" />
-    <param name="init_z"   value="$(arg init_z)"   unless="$(eval init_z   == -99999)" />
-    <param name="init_yaw" value="$(arg init_yaw)" unless="$(eval init_yaw == -99999)" />
+    <param name="init_x"     value="$(arg init_x)"     unless="$(eval init_x     == -99999)" />
+    <param name="init_y"     value="$(arg init_y)"     unless="$(eval init_y     == -99999)" />
+    <param name="init_z"     value="$(arg init_z)"     unless="$(eval init_z     == -99999)" />
+    <param name="init_roll"  value="$(arg init_roll)"  unless="$(eval init_roll  == -99999)" />
+    <param name="init_pitch" value="$(arg init_pitch)" unless="$(eval init_pitch == -99999)" />
+    <param name="init_yaw"   value="$(arg init_yaw)"   unless="$(eval init_yaw   == -99999)" />
+    <param name="map_pcd_path"  value="$(arg map_pcd_path)"  unless="$(eval map_pcd_path == '')" />
+    <param name="map_pcd_path2" value="$(arg map_pcd_path2)" unless="$(eval map_pcd_path == '')" />
     <param name="log_csv_path"  value="$(arg output_dir)/map_localizer.csv" />
     <param name="traj_pcd_path" value="$(arg output_dir)/map_localizer.pcd" />
   </node>

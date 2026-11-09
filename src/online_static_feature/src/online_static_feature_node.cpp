@@ -54,7 +54,7 @@ public:
 
         // (옵션) map_localizer가 발행하는 T_map_odom. extract_in_map_frame=true일 때
         // window를 map 좌표계로 옮겨 voxel/pillar 격자를 구성하는 데 쓴다.
-        if (extract_in_map_frame_)
+        if (extract_frame_ != "odom")
             map_odom_sub_ = nh_.subscribe(map_odom_topic_, 10,
                                           &OnlineStaticFeatureNode::mapOdomCallback, this);
 
@@ -82,7 +82,7 @@ public:
                         << ", pose_topic=" << pose_topic_
                         << ", window_frames=" << window_frames_
                         << ", transform_with_pose=" << transform_with_pose_
-                        << ", extract_in_map_frame=" << extract_in_map_frame_
+                        << ", extract_frame=" << extract_frame_
                         << ", local_origin_mode=" << local_origin_mode_);
     }
 
@@ -197,9 +197,18 @@ private:
     bool transform_with_pose_ = true;
     // true: 최신 T_map_odom을 window 전체에 곱해 map 좌표계에서 추출하고,
     //       출력은 다시 odom 좌표계로 되돌린다. false: 기존대로 odom 좌표계에서 추출.
-    bool extract_in_map_frame_ = false;
+    bool extract_in_map_frame_ = false;   // 구 파라미터. true면 extract_frame=map_live 와 같다.
+    // extract_frame: f_MAV(voxel/pillar 격자)를 어느 좌표계에서 돌릴지.
+    //   odom     : odom(=첫 스캔 센서) 좌표계. 격자가 장면에 고정. 수직축 = 첫 센서 z. (기본)
+    //   map_init : 처음 받은 T_map_odom(= 초기 전역자세 ^W T_0)을 고정해서 곱한다.
+    //              격자가 장면에 고정되면서 수직축·격자 위상은 map 기준. 초기 roll/pitch 가정 제거.
+    //   map_live : 매 프레임 최신 T_map_odom을 곱한다. 격자가 C의 흔들림만큼 움직인다.
+    //              (노은역 full-bag A/B에서 fitness 악화 → ablation 용으로만 남김)
+    // 어느 모드든 출력은 같은 변환의 역으로 odom 좌표계로 되돌려 발행한다.
+    std::string extract_frame_ = "odom";
     bool has_map_odom_ = false;
     Eigen::Affine3f T_map_odom_latest_ = Eigen::Affine3f::Identity();
+    Eigen::Affine3f T_map_odom_first_ = Eigen::Affine3f::Identity();
     bool subtract_local_origin_ = false;
     bool publish_feature_history_ = true;
     bool save_on_shutdown_pcd_ = true;
@@ -251,7 +260,16 @@ private:
                    max_feature_history_points_);
         pnh_.param("transform_with_pose", transform_with_pose_, transform_with_pose_);
         pnh_.param("extract_in_map_frame", extract_in_map_frame_, extract_in_map_frame_);
+        pnh_.param<std::string>("extract_frame", extract_frame_, extract_frame_);
         pnh_.param<std::string>("map_odom_topic", map_odom_topic_, map_odom_topic_);
+        if (extract_in_map_frame_ && extract_frame_ == "odom")
+            extract_frame_ = "map_live";   // 구 bool 파라미터와의 호환
+        if (extract_frame_ != "odom" && extract_frame_ != "map_init" && extract_frame_ != "map_live")
+        {
+            ROS_WARN_STREAM("[online_static_feature] unknown extract_frame='" << extract_frame_
+                            << "', falling back to 'odom'");
+            extract_frame_ = "odom";
+        }
         pnh_.param("publish_feature_history", publish_feature_history_, publish_feature_history_);
         pnh_.param("save_on_shutdown_pcd", save_on_shutdown_pcd_,
                    save_on_shutdown_pcd_);
@@ -673,11 +691,13 @@ private:
         // accumulated_cloud는 위에서 이미 odom 좌표계로 발행됐다.
         const Eigen::Affine3f *T_back = nullptr;
         Eigen::Affine3f T_odom_map = Eigen::Affine3f::Identity();
-        if (extract_in_map_frame_ && has_map_odom_)
+        if (extract_frame_ != "odom" && has_map_odom_)
         {
             stage_start = SteadyClock::now();
-            pcl::transformPointCloud(*accumulated, *accumulated, T_map_odom_latest_);
-            T_odom_map = T_map_odom_latest_.inverse();
+            const Eigen::Affine3f &T_extract =
+                (extract_frame_ == "map_init") ? T_map_odom_first_ : T_map_odom_latest_;
+            pcl::transformPointCloud(*accumulated, *accumulated, T_extract);
+            T_odom_map = T_extract.inverse();
             T_back = &T_odom_map;
             stage_end = SteadyClock::now();
             latency.map_frame_ms = elapsedMs(stage_start, stage_end);
@@ -732,9 +752,11 @@ private:
         if (!has_map_odom_)
         {
             has_map_odom_ = true;
+            T_map_odom_first_ = T_map_odom_latest_;   // map_init 모드가 고정해서 쓰는 ^W T_0
+            const Eigen::Vector3f t = T_map_odom_first_.translation();
             ROS_INFO_STREAM("[online_static_feature] first T_map_odom received from "
-                            << map_odom_topic_
-                            << "; extracting features in map frame from now on");
+                            << map_odom_topic_ << " (t=" << t.x() << ", " << t.y() << ", " << t.z()
+                            << "); extract_frame=" << extract_frame_ << " active from now on");
         }
     }
 

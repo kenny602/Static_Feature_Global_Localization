@@ -629,7 +629,14 @@ private:
              << "map_points,map_prep_ms,"
              << "x,y,z,roll,pitch,yaw,rot_deg,"
              << "corr_dx,corr_dy,corr_dz,corr_dyaw,"
-             << "fitness,converged,rejected,preprocess_ms,align_ms,total_ms\n";
+             << "fitness,converged,rejected,preprocess_ms,align_ms,total_ms,"
+             // T_map_odom(C)의 자세: odom 좌표계(= 첫 스캔 센서 좌표계)가 map 에 대해
+             // 얼마나 기울었는지. 시간에 따른 변화 = 적분된 odometry 회전 드리프트.
+             << "mo_roll,mo_pitch,mo_yaw,"
+             // 보정량을 센서 위치에서 표현한 값: (C_prev O_t)^-1 (C_new O_t) = O_t^-1 delta O_t.
+             // corr_dx/dy 는 odom 원점 기준이라 원점에서 멀어질수록 회전 보정이 지렛대로
+             // 섞여 들어간다. 프레임간 jitter 지표는 이 열을 쓸 것.
+             << "corr_lidar_dx,corr_lidar_dy,corr_lidar_dz,corr_lidar_dyaw\n";
         ROS_INFO_STREAM("[map_localizer] log: " << log_csv_path_);
     }
 
@@ -868,6 +875,11 @@ private:
         const Eigen::Isometry3d delta = prediction.inverse() * T_map_odom_;
         double droll, dpitch, dyaw;
         rpyFromIsometry(delta, droll, dpitch, dyaw);
+        double mo_roll, mo_pitch, mo_yaw;
+        rpyFromIsometry(T_map_odom_, mo_roll, mo_pitch, mo_yaw);
+        const Eigen::Isometry3d delta_lidar = T_odom_lidar.inverse() * delta * T_odom_lidar;
+        double dl_roll, dl_pitch, dl_yaw;
+        rpyFromIsometry(delta_lidar, dl_roll, dl_pitch, dl_yaw);
         log_ << frame_count_ << ',' << stamp.toSec() << ','
              << matcher_type_ << ',' << source_mode_ << ','
              << source->size() << ',' << src_points_used << ','
@@ -884,7 +896,12 @@ private:
              << dyaw << ','
              << fitness << ',' << (converged ? 1 : 0) << ','
              << (rejected ? 1 : 0) << ','
-             << preprocess_ms << ',' << align_ms << ',' << total_ms << '\n';
+             << preprocess_ms << ',' << align_ms << ',' << total_ms << ','
+             << mo_roll << ',' << mo_pitch << ',' << mo_yaw << ','
+             << delta_lidar.translation().x() << ','
+             << delta_lidar.translation().y() << ','
+             << delta_lidar.translation().z() << ','
+             << dl_yaw << '\n';
         log_.flush();
     }
 
