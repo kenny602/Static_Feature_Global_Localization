@@ -95,6 +95,16 @@ GT 없음 → precision-only 평가로 확정.
   `extract_in_map_frame` 스위치는 남아 있지만 실험 조건에 넣지 않는다.
   (`extract_in_map_frame=true`는 노은역 full-bag A/B에서 fitness 0.24→0.31로
   나빠져 기본값 false 유지. 등속도 예측 수정은 결과를 바꾸지 않았음.)
+  2026-11-10 추가: `extract_frame=map_init`(초기 전역자세 하나로 고정)도 노은역에서
+  map_live와 같은 정도로 나쁨(fitness 0.258→0.312, 동적 제거 −7 %). 즉 노은역의
+  악화 원인은 격자의 **이동**이 아니라 **맵 기준 격자의 정적 위상·방향**(지면·벽이
+  0.5 m 격자 경계에 걸리는 방식)이다. Isaac(0.25 m 격자, 작은 창고)에서는 세 모드가
+  동일. → 방법이 격자 위상에 민감하다는 점은 논문 한계/향후 과제(지면 기준 z-위상
+  고정, 진행방향 정렬 격자)로 기록할 것. 기본값은 `odom` 유지.
+  노은역 odom 좌표계 roll/pitch 드리프트 실측: 17.6분에 최대 8.8°, 종료 시 6.1°
+  (CSV `mo_roll/mo_pitch`). 이 기울기에서도 odom 추출 fitness는 유지됨.
+  보정량은 반드시 센서 기준 `corr_lidar_*`로 볼 것: odom 원점 기준 `corr_dx/dy`는
+  지렛대 효과로 2~3배 부풀려짐(중앙값 8.2 vs 3.9 cm, p90 36 vs 13 cm).
 - primitive matcher는 future work (이전 결정 유지).
 
 ### 2.4 Isaac Sim 기반 정확도(accuracy) 평가 (ROS 2 Jazzy, MAV_Localizer)
