@@ -57,24 +57,6 @@ online_static_feature_node:
   # dense_window_cloud가 이미 odom frame이라 추가 변환 불필요
   transform_with_pose: false
 
-  # extract_frame: 정적 feature(voxel/pillar 격자)를 추출하는 좌표계 (launch arg로도 덮어쓴다).
-  #   odom 이 아니면 map_localizer가 직전 프레임에 낸 T_map_odom(C)에서 만든 T_extract를 window
-  #   전체에 똑같이 곱해 격자를 구성하고, 출력은 T_extract^-1로 되돌려 여전히 odom 좌표계로
-  #   발행하므로 map_localizer 쪽은 바뀌지 않는다. accumulated(raw) 조건은 이 노드를 안 거침.
-  #   (구 bool extract_in_map_frame 은 2026-11-10 제거)
-  #   odom       : 첫 스캔 센서 좌표계에서 격자 구성 (기본, 2026-11-10 확정)
-  #   map_init   : 처음 받은 T_map_odom(= 초기 전역자세 ^W T_0) 하나를 고정해서 곱한 뒤 격자 구성.
-  #                격자는 장면에 고정된 채 수직축·위상만 map 기준이 된다. 초기 roll/pitch 가정 제거.
-  #   map_live   : 매 프레임 최신 T_map_odom 을 곱한다.
-  #   odom_level : 최신 T_map_odom 의 roll·pitch 만 곱한다(yaw·translation 제거). 격자 원점·heading 은
-  #                odom 그대로, 수직축만 map(중력)에 맞춘다. 향후 IMU 중력으로 대체 가능한 자리.
-  # 2026-11-10 결과: 네 모드 간 정밀도(corr_lidar)·Isaac GT 차이 없음. fitness/src_points_used 는
-  #   odom 모드에서 추출 격자와 small_gicp 축약 격자(둘 다 0.5 m, odom 원점)가 일치해 생기는
-  #   artifact 때문에 모드 간 비교 지표로 쓸 수 없다 (CLAUDE.md 2.3).
-  # launch 인자 extract_frame:=... 를 주면 이 값을 덮어쓴다.
-  extract_frame: odom
-  map_odom_topic: /map_localizer/map_odom_pose
-
   static_feature_topic: scan_static_features
   sync_slop_sec: 0.05
   latency_log_enabled: true
@@ -136,10 +118,10 @@ map_localizer:
   #        CloudCompare 진행방향 5점 TLS 적합 -0.36° -> 셋이 일치.
   #        yaw 오차 2°면 50 m 점이 1.7 m 밀린다. sg_max_corr_dist=2.0 이므로
   #        ±2° 안이어야 하는데 충분히 들어온다.
-  init_x: 397.9
-  init_y: 205.7
-  init_z: 17.7
-  init_yaw: 0.0
+  init_x: 396.38
+  init_y: 206.76
+  init_z: 17.78
+  init_yaw: -6.35
   # init_x: 0.0
   # init_y: 0.0
   # init_z: 0.0

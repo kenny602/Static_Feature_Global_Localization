@@ -91,26 +91,27 @@ GT 없음 → precision-only 평가로 확정.
 - matcher는 `vgicp` 단일. 예전 2×2 설계(source_mode × matcher_type: ndt vs
   vgicp)는 폐기. 노은역 precision 실험과 Isaac 정확도 실험 모두 이 2조건으로
   보고한다. 시나리오별 trajectory 그림도 2조건만 그린다.
-- 코드의 `features`(plane/corner 분리 발행) 모드와 feature node의
-  `extract_frame` 스위치(odom | map_init | map_live | odom_level)는 남아 있지만 실험
-  조건에 넣지 않는다. 구 bool `extract_in_map_frame`은 2026-11-10 제거(true+odom이
-  말없이 map_live로 바뀌는 함정이 있었음). 등속도 예측 수정은 결과를 바꾸지 않았음.
-  2026-11-10 정정: `map_init`(초기 전역자세 고정)·`odom_level`(C의 roll·pitch만 적용해
-  격자를 중력에 세움)도 노은역 full-bag에서 odom보다 fitness가 높았으나(0.258→0.31~0.33),
-  이는 **측정 artifact**다. odom 모드에서는 feature 추출 격자(`voxel_size` 0.5, odom 원점,
-  `floor(p/0.5)`)와 localizer의 small_gicp 축약 격자(`sg_downsample_resolution` 0.5, 같은
-  원점·같은 floor)가 정확히 일치해 "추출 복셀 1개 = 축약 셀 1개"가 되고, 격자를 2.5°만
-  돌려도 같은 점들이 셀을 40 % 더 차지하며(`src_points_used` 2.1k→3.0k) residual 구성이
-  바뀐다. 축약을 0.4 m로 어긋나게 하면 점 수 격차는 +4 %로 사라지고 odom(0.217)과
-  level ds0.5(0.217)의 fitness가 같아진다. Isaac(둘 다 0.25 m)도 같은 일치 상태.
-  → **fitness·src_points_used는 추출 좌표계 간 비교 지표로 쓸 수 없다.** 정밀도 지표
-  (`corr_lidar_*`)로는 수평 격자가 같거나 약간 낫고(60 s: 중앙값 2.2 vs 2.5 cm), Isaac GT
-  ATE는 세 모드 동일. "격자 위상 민감성" 주장은 철회. 기본값은 `odom` 유지(차이 없음),
-  중력 정렬 격자가 필요하면 `odom_level`. ds0.4 full-bag 비교(odom vs odom_level)는 별도 기록.
-  노은역 odom 좌표계 roll/pitch 드리프트 실측: 17.6분에 최대 8.8°, 종료 시 6.1°
+- 코드의 `features`(plane/corner 분리 발행) 모드는 남아 있지만 실험 조건에 넣지 않는다.
+  등속도 예측 수정은 결과를 바꾸지 않았음.
+- **feature 추출 좌표계 스위치(`extract_frame`: odom | map_init | map_live | odom_level)는
+  2026-11-10 코드에서 완전히 제거**했다(재현님 결정: 스위치가 많으면 코드가 난잡). 추출은
+  항상 odom 좌표계(원래 동작). 필요하면 git 이력 `1f0a821`~`af3969e`에서 복구 가능.
+  제거 전 실험 결론(기록용):
+  - 네 모드 간 차이 없음: Isaac GT ATE odom 0.0712 / map_init 0.0707 / map_live 0.0710 /
+    odom_level 0.0711 m, 노은역 `corr_lidar_*`도 같은 수준.
+  - 모드 간 fitness·`src_points_used` 차이(0.258→0.31~0.33)는 **측정 artifact**였다. odom 추출
+    격자(`voxel_size` 0.5, odom 원점, floor)와 localizer의 small_gicp 축약 격자
+    (`sg_downsample_resolution` 0.5)가 정확히 일치해 "추출 복셀 1개 = 축약 셀 1개"가 되고,
+    격자를 2.5°만 돌려도 점이 셀을 40 % 더 차지한다. 축약을 0.4 m로 어긋나게 하면 사라진다.
+    → fitness·src_points_used는 추출 방식이 다른 조건 간 비교 지표로 쓰지 말 것.
+  - 중력 정렬 격자(IMU 중력으로 pillar 수직축을 세우는 것)는 future work.
+- 노은역 odom 좌표계 roll/pitch 드리프트 실측: 17.6분에 최대 8.8°, 종료 시 6.1°
   (CSV `mo_roll/mo_pitch`). 이 기울기에서도 odom 추출 fitness는 유지됨.
   보정량은 반드시 센서 기준 `corr_lidar_*`로 볼 것: odom 원점 기준 `corr_dx/dy`는
   지렛대 효과로 2~3배 부풀려짐(중앙값 8.2 vs 3.9 cm, p90 36 vs 13 cm).
+- **노은역은 같은 설정을 다시 돌려도 결과가 크게 달라진다**(2026-11-10, full-bag 2회씩:
+  `corr_lidar` p90이 같은 설정에서 13~22 cm로 변동, 12~13분 구간에서 10~24 m 일시 이탈이
+  어떤 run에는 나오고 어떤 run에는 안 나옴). 1회 실행 비교로 결론 내지 말 것 — 조건당 반복 필수.
 - primitive matcher는 future work (이전 결정 유지).
 
 ### 2.4 Isaac Sim 기반 정확도(accuracy) 평가 (ROS 2 Jazzy, MAV_Localizer)
@@ -184,8 +185,8 @@ ROS 2로 포팅한 `MAV_Localizer` 워크스페이스를 만들었다.
   - `scripts/run_isaac_ros1.sh [attempts] [conds]` : 조건(raw_dyn/mav_sta…) × attempt 일괄 실행.
     `config/localization_isaac.yaml` + `config/gis_isaac_feature.yaml`(voxel 0.25 — ROS2 Isaac 실험과
     동일; 노은역은 0.5) 사용, init pose는 `attempt_N_gt/init_pose.txt`, 전용 roscore(11411).
-    `EXTRACT_FRAME=odom|map_init|map_live`로 feature 격자 좌표계 A/B. 결과는
-    `isaac_data/experiments/results_ros1_<frame>/`, 평가는 기존 `eval_isaac_ate.py --results … --out …`.
+    결과는 기본 `isaac_data/experiments/results_ros1/`(`OUT_ROOT`로 변경), 평가는 기존 `eval_isaac_ate.py --results … --out …`.
+    (과거 결과 폴더 `results_ros1_{odom,map_init,map_live,odom_level,phi1,phi2}`는 제거된 스위치 시절 것)
   - 검증: attempt_1 mav_sta ATE RMSE 0.0416 m (ROS2 0.0445 m), 842/842 프레임, 10 Hz 실시간.
   - **ROS1 전체 결과 (2026-11-10, attempt 1~10, 모두 coverage 100 %, 수신=처리)**:
     raw_dyn 0.0772 m / mav_sta 0.0712 m (−8 %, 10 bag 중 9개 우세, 최대오차 0.45→0.38 m,
@@ -242,6 +243,12 @@ voxel(0.1~0.2m) → 같은 (i,j) voxel을 pillar로 묶어 판정. 동적/비정
 3. span filter (`use_span_filter`, `H_min_voxel`) — pillar 수직 span 부족
    시 전체 제거
 4. fill-ratio/sandwich/φ-통계 — 점유율 기반 벽/바닥·천장/동적 판정
+   - φ 검사(점유율 > `fill_ratio_thresh`인 pillar의 법선 고도각 평균/표준편차)는 **k_min만 제외한
+     나머지 복셀 전부**로 한다(2026-11-10 변경, 표본 1개면 평균 조건만). 이전에는 k_min·k_max를
+     빼고 내부 복셀 ≥2일 때만 검사해서 2~3복셀 pillar는 검사 없이 k_min만 남기고 버렸다
+     (fill 제거 점의 55~65 %). 변경 전후 Isaac ATE 0.0712→0.0709 m(동일), 노은역 정밀도도
+     실행 간 편차 이내. **offline 맵 생성 쪽(`offline_static_feature_ws`)은 아직 옛 규칙** —
+     맵을 새 규칙으로 다시 만들지 미정.
 5. classifyPillar 자체 — pillar 전체 PCA S값 + normal 일관성(σ_θ, `n_bar`
    기준 각 θ의 평균/표준편차)로 PLANAR/CORNER/DYNAMIC 판정
 6. 2-pass 공간 필터 — unknown-space filter(고립 pillar 제거) + floor-height

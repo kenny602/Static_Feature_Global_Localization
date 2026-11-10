@@ -14,8 +14,7 @@
 # env:
 #   ISAAC_DATA    기본 /home/rain/data/IsaacSim_Warehouse/isaac_data
 #   BAG_DIR       기본 $ISAAC_DATA/online_scan_scenario_ros1  (convert_isaac_mcap.sh 산출물)
-#   EXTRACT_FRAME odom | map_init | map_live  (기본 odom) → feature node 격자 좌표계
-#   OUT_ROOT      기본 $ISAAC_DATA/experiments/results_ros1_$EXTRACT_FRAME
+#   OUT_ROOT      기본 $ISAAC_DATA/experiments/results_ros1
 #   MAP_NAME      기본 dynamic_environment_1
 #   MATCHER       기본 vgicp      RATE 기본 1.0 (bag 재생 배속)      DRAIN 기본 10 (bag 끝난 뒤 대기 s)
 #   ROS_PORT      기본 11411 (전용 roscore 를 띄운다; 0 이면 기본 master 11311 을 그대로 사용)
@@ -29,8 +28,7 @@ source "$WS/devel/setup.bash"
 
 ISAAC_DATA="${ISAAC_DATA:-/home/rain/data/IsaacSim_Warehouse/isaac_data}"
 BAG_DIR="${BAG_DIR:-$ISAAC_DATA/online_scan_scenario_ros1}"
-EXTRACT_FRAME="${EXTRACT_FRAME:-odom}"
-OUT_ROOT="${OUT_ROOT:-$ISAAC_DATA/experiments/results_ros1_$EXTRACT_FRAME}"
+OUT_ROOT="${OUT_ROOT:-$ISAAC_DATA/experiments/results_ros1}"
 MAP_NAME="${MAP_NAME:-dynamic_environment_1}"
 MATCHER="${MATCHER:-vgicp}"
 RATE="${RATE:-1.0}"
@@ -59,7 +57,7 @@ fi
 cleanup() { [ -n "$RC" ] && kill -INT "$RC" 2>/dev/null && wait "$RC" 2>/dev/null; }
 trap cleanup EXIT
 
-echo "maps: $MAP_NAME | extract_frame=$EXTRACT_FRAME matcher=$MATCHER rate=$RATE | master=${ROS_MASTER_URI:-default}" | tee -a "$LOG"
+echo "maps: $MAP_NAME | matcher=$MATCHER rate=$RATE | master=${ROS_MASTER_URI:-default}" | tee -a "$LOG"
 
 for A in "${ATTEMPTS[@]}"; do
     BAG="$BAG_DIR/attempt_$A.bag"
@@ -88,7 +86,7 @@ for A in "${ATTEMPTS[@]}"; do
         roslaunch online_static_feature map_localizer.launch \
             config:="$CONFIG" feature_config:="$FEATURE_CONFIG" \
             source_mode:="$mode" matcher_type:="$MATCHER" \
-            output_dir:="$OUT" feature_window_frames:="$fw" extract_frame:="$EXTRACT_FRAME" \
+            output_dir:="$OUT" feature_window_frames:="$fw" \
             "${map_args[@]}" \
             init_x:="$ix" init_y:="$iy" init_z:="$iz" \
             init_roll:="${iroll:-0}" init_pitch:="${ipitch:-0}" init_yaw:="$iyaw" \

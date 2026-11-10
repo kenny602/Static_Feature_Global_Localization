@@ -563,14 +563,15 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
             // ── Case 2A: fill_ratio 높음 → φ 통계로 벽/동적 판정 ─────────
             if (fill_ratio > params.fill_ratio_thresh)
             {
-                // k_min & k_max 제외한 중간 voxel로 φ mean/std 계산
+                // k_min 만 제외한 나머지 voxel 전부로 φ mean/std 계산 (표본 1개면 std=0, 평균 조건만 적용).
+                // k_max 도 포함한다: 2~3복셀 pillar도 검사를 받고, 실외에서는 천장이 k_max에 찍히는 일이 드물다.
                 const auto t_phi0 = ProfClock::now();
                 struct PhiSample { double phi; double w; };
                 std::vector<PhiSample> phi_list;
                 phi_list.reserve(ptr->voxels.size());
                 for (const auto *vox : ptr->voxels)
                 {
-                    if (!vox || vox == vox_bot || vox == vox_top) continue;
+                    if (!vox || vox == vox_bot) continue;
                     const double a = alphaOfVoxel(vox);
                     const double a_clamped = std::min(1.0, std::max(0.0, a));
                     const double w = (params.use_phi_weight == 1)
@@ -580,7 +581,7 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
                 }
  
                 bool is_wall_phi = false;
-                if (phi_list.size() >= 2)
+                if (!phi_list.empty())
                 {
                     double sum_w = 0.0;
                     double sum_phi = 0.0;

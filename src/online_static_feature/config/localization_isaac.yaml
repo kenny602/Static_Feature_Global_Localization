@@ -57,18 +57,6 @@ online_static_feature_node:
   # dense_window_cloud가 이미 odom frame이라 추가 변환 불필요
   transform_with_pose: false
 
-  # 정적 feature를 추출하는 좌표계 (A/B 비교용 스위치. launch arg로도 덮어쓴다).
-  #   false: odom 좌표계에서 voxel/pillar 격자 구성 (기존 동작). 격자가 장면에 고정된다.
-  #   true : map_localizer가 직전 프레임에 낸 T_map_odom(C)을 window 전체에 똑같이 곱해
-  #          map 좌표계에서 격자를 구성한다. window 내부 상대 배치는 바뀌지 않고,
-  #          격자가 offline 맵과 같은 칸에 놓인다. 출력은 C^-1로 되돌려 여전히
-  #          odom 좌표계로 발행하므로 map_localizer 쪽은 바뀌지 않는다.
-  #          C가 프레임마다 흔들리면 그만큼 격자가 장면 위에서 움직인다는 점이 trade-off.
-  #   accumulated(raw) 조건은 이 노드를 안 거치므로 영향 없음.
-  # odom | map_init | map_live | odom_level (설명은 localization.yaml). run_isaac_ros1.sh 가 EXTRACT_FRAME 으로 덮어쓴다.
-  extract_frame: odom
-  map_odom_topic: /map_localizer/map_odom_pose
-
   static_feature_topic: scan_static_features
   sync_slop_sec: 0.05
   latency_log_enabled: true
