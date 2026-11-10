@@ -95,12 +95,18 @@ GT 없음 → precision-only 평가로 확정.
   `extract_in_map_frame` 스위치는 남아 있지만 실험 조건에 넣지 않는다.
   (`extract_in_map_frame=true`는 노은역 full-bag A/B에서 fitness 0.24→0.31로
   나빠져 기본값 false 유지. 등속도 예측 수정은 결과를 바꾸지 않았음.)
-  2026-11-10 추가: `extract_frame=map_init`(초기 전역자세 하나로 고정)도 노은역에서
-  map_live와 같은 정도로 나쁨(fitness 0.258→0.312, 동적 제거 −7 %). 즉 노은역의
-  악화 원인은 격자의 **이동**이 아니라 **맵 기준 격자의 정적 위상·방향**(지면·벽이
-  0.5 m 격자 경계에 걸리는 방식)이다. Isaac(0.25 m 격자, 작은 창고)에서는 세 모드가
-  동일. → 방법이 격자 위상에 민감하다는 점은 논문 한계/향후 과제(지면 기준 z-위상
-  고정, 진행방향 정렬 격자)로 기록할 것. 기본값은 `odom` 유지.
+  2026-11-10 정정: `map_init`(초기 전역자세 고정)·`odom_level`(C의 roll·pitch만 적용해
+  격자를 중력에 세움)도 노은역 full-bag에서 odom보다 fitness가 높았으나(0.258→0.31~0.33),
+  이는 **측정 artifact**다. odom 모드에서는 feature 추출 격자(`voxel_size` 0.5, odom 원점,
+  `floor(p/0.5)`)와 localizer의 small_gicp 축약 격자(`sg_downsample_resolution` 0.5, 같은
+  원점·같은 floor)가 정확히 일치해 "추출 복셀 1개 = 축약 셀 1개"가 되고, 격자를 2.5°만
+  돌려도 같은 점들이 셀을 40 % 더 차지하며(`src_points_used` 2.1k→3.0k) residual 구성이
+  바뀐다. 축약을 0.4 m로 어긋나게 하면 점 수 격차는 +4 %로 사라지고 odom(0.217)과
+  level ds0.5(0.217)의 fitness가 같아진다. Isaac(둘 다 0.25 m)도 같은 일치 상태.
+  → **fitness·src_points_used는 추출 좌표계 간 비교 지표로 쓸 수 없다.** 정밀도 지표
+  (`corr_lidar_*`)로는 수평 격자가 같거나 약간 낫고(60 s: 중앙값 2.2 vs 2.5 cm), Isaac GT
+  ATE는 세 모드 동일. "격자 위상 민감성" 주장은 철회. 기본값은 `odom` 유지(차이 없음),
+  중력 정렬 격자가 필요하면 `odom_level`. ds0.4 full-bag 비교(odom vs odom_level)는 별도 기록.
   노은역 odom 좌표계 roll/pitch 드리프트 실측: 17.6분에 최대 8.8°, 종료 시 6.1°
   (CSV `mo_roll/mo_pitch`). 이 기울기에서도 odom 추출 fitness는 유지됨.
   보정량은 반드시 센서 기준 `corr_lidar_*`로 볼 것: odom 원점 기준 `corr_dx/dy`는

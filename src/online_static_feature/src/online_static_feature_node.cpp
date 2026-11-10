@@ -204,6 +204,8 @@ private:
     //              격자가 장면에 고정되면서 수직축·격자 위상은 map 기준. 초기 roll/pitch 가정 제거.
     //   map_live : 매 프레임 최신 T_map_odom을 곱한다. 격자가 C의 흔들림만큼 움직인다.
     //              (노은역 full-bag A/B에서 fitness 악화 → ablation 용으로만 남김)
+    //   odom_level : 최신 T_map_odom의 roll·pitch만 적용(yaw·translation 제거). 격자 원점·heading·
+    //              xy 위상은 odom 그대로 두고 수직축만 map(중력)에 맞춘다. 기울기 효과만 분리하는 조건.
     // 어느 모드든 출력은 같은 변환의 역으로 odom 좌표계로 되돌려 발행한다.
     std::string extract_frame_ = "odom";
     bool has_map_odom_ = false;
@@ -264,7 +266,8 @@ private:
         pnh_.param<std::string>("map_odom_topic", map_odom_topic_, map_odom_topic_);
         if (extract_in_map_frame_ && extract_frame_ == "odom")
             extract_frame_ = "map_live";   // 구 bool 파라미터와의 호환
-        if (extract_frame_ != "odom" && extract_frame_ != "map_init" && extract_frame_ != "map_live")
+        if (extract_frame_ != "odom" && extract_frame_ != "map_init" && extract_frame_ != "map_live" &&
+            extract_frame_ != "odom_level")
         {
             ROS_WARN_STREAM("[online_static_feature] unknown extract_frame='" << extract_frame_
                             << "', falling back to 'odom'");
@@ -694,8 +697,15 @@ private:
         if (extract_frame_ != "odom" && has_map_odom_)
         {
             stage_start = SteadyClock::now();
-            const Eigen::Affine3f &T_extract =
+            Eigen::Affine3f T_extract =
                 (extract_frame_ == "map_init") ? T_map_odom_first_ : T_map_odom_latest_;
+            if (extract_frame_ == "odom_level")
+            {
+                // R_level = Rz(yaw)^T · R(C): yaw를 빼서 roll·pitch(수직축 정렬)만 남긴다. translation 0.
+                const Eigen::Matrix3f R = T_map_odom_latest_.linear();
+                const float yaw = std::atan2(R(1, 0), R(0, 0));
+                T_extract = Eigen::Affine3f(Eigen::AngleAxisf(-yaw, Eigen::Vector3f::UnitZ()) * R);
+            }
             pcl::transformPointCloud(*accumulated, *accumulated, T_extract);
             T_odom_map = T_extract.inverse();
             T_back = &T_odom_map;
