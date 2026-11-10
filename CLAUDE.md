@@ -92,9 +92,9 @@ GT 없음 → precision-only 평가로 확정.
   vgicp)는 폐기. 노은역 precision 실험과 Isaac 정확도 실험 모두 이 2조건으로
   보고한다. 시나리오별 trajectory 그림도 2조건만 그린다.
 - 코드의 `features`(plane/corner 분리 발행) 모드와 feature node의
-  `extract_in_map_frame` 스위치는 남아 있지만 실험 조건에 넣지 않는다.
-  (`extract_in_map_frame=true`는 노은역 full-bag A/B에서 fitness 0.24→0.31로
-  나빠져 기본값 false 유지. 등속도 예측 수정은 결과를 바꾸지 않았음.)
+  `extract_frame` 스위치(odom | map_init | map_live | odom_level)는 남아 있지만 실험
+  조건에 넣지 않는다. 구 bool `extract_in_map_frame`은 2026-11-10 제거(true+odom이
+  말없이 map_live로 바뀌는 함정이 있었음). 등속도 예측 수정은 결과를 바꾸지 않았음.
   2026-11-10 정정: `map_init`(초기 전역자세 고정)·`odom_level`(C의 roll·pitch만 적용해
   격자를 중력에 세움)도 노은역 full-bag에서 odom보다 fitness가 높았으나(0.258→0.31~0.33),
   이는 **측정 artifact**다. odom 모드에서는 feature 추출 격자(`voxel_size` 0.5, odom 원점,

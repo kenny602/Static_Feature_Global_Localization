@@ -37,10 +37,8 @@
 
   <arg name="source_mode"  default="static" />  <!-- features | static | accumulated -->
   <arg name="matcher_type" default="vgicp" />        <!-- ndt | gicp | vgicp | icp | plane_icp -->
-  <!-- feature 추출 좌표계. 비워 두면(기본) config yaml 의 extract_in_map_frame 값을 그대로 쓴다.
-       true/false 를 주면 yaml 값을 덮어쓴다. 설명은 config/localization.yaml 참고. -->
-  <arg name="extract_in_map_frame" default="" />
-  <!-- odom | map_init | map_live. 비워 두면 yaml 의 extract_frame 값을 쓴다. -->
+  <!-- feature 추출 좌표계: odom | map_init | map_live | odom_level. 비워 두면(기본) yaml 의
+       extract_frame 값을 쓴다. 설명은 config/localization.yaml 참고. -->
   <arg name="extract_frame" default="" />
   <!-- <arg name="output_dir"
        default="/home/rain/online_static_feature_ws/output/map_localizer/ETRI_LAS_EVAL/static_point/small_gicp/TRACK024/3frame/chunk08_50cm" /> -->
@@ -79,8 +77,6 @@
            value="$(eval 1 if source_mode == 'features' else 0)" />
     <!-- arg 를 준 경우에만 yaml 값을 덮어쓴다 (init_x 의 -99999 와 같은 방식).
          launch 의 param 은 rosparam load 보다 우선하므로, 무조건 쓰면 yaml 편집이 무시된다. -->
-    <param name="extract_in_map_frame" value="$(arg extract_in_map_frame)"
-           unless="$(eval extract_in_map_frame == '')" />
     <param name="extract_frame" value="$(arg extract_frame)"
            unless="$(eval extract_frame == '')" />
     <param name="window_frames" value="$(arg feature_window_frames)"

@@ -65,8 +65,7 @@ online_static_feature_node:
   #          odom 좌표계로 발행하므로 map_localizer 쪽은 바뀌지 않는다.
   #          C가 프레임마다 흔들리면 그만큼 격자가 장면 위에서 움직인다는 점이 trade-off.
   #   accumulated(raw) 조건은 이 노드를 안 거치므로 영향 없음.
-  extract_in_map_frame: false
-  # odom | map_init | map_live (설명은 localization.yaml). run_isaac_ros1.sh 가 EXTRACT_FRAME 으로 덮어쓴다.
+  # odom | map_init | map_live | odom_level (설명은 localization.yaml). run_isaac_ros1.sh 가 EXTRACT_FRAME 으로 덮어쓴다.
   extract_frame: odom
   map_odom_topic: /map_localizer/map_odom_pose
 

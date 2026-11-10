@@ -52,8 +52,8 @@ public:
         cloud_sub_.subscribe(nh_, cloud_topic_, 1); // cloud_topic : /scan_matching_accumulator_node/dense_window_cloud
         pose_sub_.subscribe(nh_, pose_topic_, 10);  // pose_topic  : /scan_matching_accumulator_node/scan_matching_pose
 
-        // (옵션) map_localizer가 발행하는 T_map_odom. extract_in_map_frame=true일 때
-        // window를 map 좌표계로 옮겨 voxel/pillar 격자를 구성하는 데 쓴다.
+        // (옵션) map_localizer가 발행하는 T_map_odom. extract_frame != odom 일 때
+        // window를 그 좌표계로 옮겨 voxel/pillar 격자를 구성하는 데 쓴다.
         if (extract_frame_ != "odom")
             map_odom_sub_ = nh_.subscribe(map_odom_topic_, 10,
                                           &OnlineStaticFeatureNode::mapOdomCallback, this);
@@ -159,7 +159,7 @@ private:
         double ceiling_crop_ms = 0.0;
         double downsample_ms = 0.0;
         double publish_accumulated_ms = 0.0;
-        double map_frame_ms = 0.0;      // extract_in_map_frame: window에 T_map_odom 적용 시간
+        double map_frame_ms = 0.0;      // extract_frame != odom: window에 T_extract 적용 시간
         double window_algorithm_ms = 0.0;
         double window_total_ms = 0.0;
 
@@ -171,7 +171,7 @@ private:
 
     std::string cloud_topic_ = "/Pointcloud2";
     std::string pose_topic_ = "/lidar_pose";
-    // extract_in_map_frame=true일 때 구독하는 T_map_odom (map_localizer 출력)
+    // extract_frame != odom 일 때 구독하는 T_map_odom (map_localizer 출력)
     std::string map_odom_topic_ = "/map_localizer/map_odom_pose";
     std::string map_frame_ = "map";
     std::string accumulated_topic_ = "accumulated_cloud";
@@ -195,15 +195,13 @@ private:
     int processed_feature_frames_ = 0;
     int max_feature_history_points_ = 2000000;
     bool transform_with_pose_ = true;
-    // true: 최신 T_map_odom을 window 전체에 곱해 map 좌표계에서 추출하고,
-    //       출력은 다시 odom 좌표계로 되돌린다. false: 기존대로 odom 좌표계에서 추출.
-    bool extract_in_map_frame_ = false;   // 구 파라미터. true면 extract_frame=map_live 와 같다.
     // extract_frame: f_MAV(voxel/pillar 격자)를 어느 좌표계에서 돌릴지.
     //   odom     : odom(=첫 스캔 센서) 좌표계. 격자가 장면에 고정. 수직축 = 첫 센서 z. (기본)
     //   map_init : 처음 받은 T_map_odom(= 초기 전역자세 ^W T_0)을 고정해서 곱한다.
     //              격자가 장면에 고정되면서 수직축·격자 위상은 map 기준. 초기 roll/pitch 가정 제거.
     //   map_live : 매 프레임 최신 T_map_odom을 곱한다. 격자가 C의 흔들림만큼 움직인다.
-    //              (노은역 full-bag A/B에서 fitness 악화 → ablation 용으로만 남김)
+    //              (2026-11-10: 정밀도·Isaac GT 기준 odom과 차이 없음. fitness 차이는 odom 모드의
+    //               추출 격자-small_gicp 축약 격자 일치에서 오는 artifact였다 — CLAUDE.md 2.3)
     //   odom_level : 최신 T_map_odom의 roll·pitch만 적용(yaw·translation 제거). 격자 원점·heading·
     //              xy 위상은 odom 그대로 두고 수직축만 map(중력)에 맞춘다. 기울기 효과만 분리하는 조건.
     // 어느 모드든 출력은 같은 변환의 역으로 odom 좌표계로 되돌려 발행한다.
@@ -261,11 +259,8 @@ private:
         pnh_.param("max_feature_history_points", max_feature_history_points_,
                    max_feature_history_points_);
         pnh_.param("transform_with_pose", transform_with_pose_, transform_with_pose_);
-        pnh_.param("extract_in_map_frame", extract_in_map_frame_, extract_in_map_frame_);
         pnh_.param<std::string>("extract_frame", extract_frame_, extract_frame_);
         pnh_.param<std::string>("map_odom_topic", map_odom_topic_, map_odom_topic_);
-        if (extract_in_map_frame_ && extract_frame_ == "odom")
-            extract_frame_ = "map_live";   // 구 bool 파라미터와의 호환
         if (extract_frame_ != "odom" && extract_frame_ != "map_init" && extract_frame_ != "map_live" &&
             extract_frame_ != "odom_level")
         {
@@ -685,9 +680,9 @@ private:
         stage_end = SteadyClock::now();
         latency.publish_accumulated_ms = elapsedMs(stage_start, stage_end);
 
-        // 8. (옵션) 추출 좌표계 선택
-        // extract_in_map_frame=true: 최신 T_map_odom(C)을 window 전체에 똑같이 곱해
-        // map 좌표계에서 voxel/pillar 격자를 구성한다. window 내부 상대 배치는 그대로다.
+        // 8. (옵션) 추출 좌표계 선택 (extract_frame)
+        // odom 이 아니면 T_extract(C 전체 또는 그 roll·pitch)를 window 전체에 똑같이 곱해
+        // 그 좌표계에서 voxel/pillar 격자를 구성한다. window 내부 상대 배치는 그대로다.
         // 추출 결과는 C^-1로 되돌려 odom 좌표계로 발행하므로 다른 노드는 바뀌지 않는다.
         // (정합은 강체변환에 공변이라 localizer가 C를 다시 곱해도 같은 문제를 푼다.)
         // 아직 C를 못 받았으면(첫 프레임) 기존대로 odom 좌표계에서 추출한다.
@@ -802,7 +797,7 @@ private:
 
     // 정적 특징 추출 함수
     // T_back: null이 아니면 추출 결과(colored)에 곱해 출력 좌표계로 되돌린다
-    //         (extract_in_map_frame일 때 T_odom_map). 입력 cloud 좌표계에서 격자를 만든다.
+    //         (extract_frame != odom 일 때 T_extract^-1). 입력 cloud 좌표계에서 격자를 만든다.
     void extractAndPublishFeatures(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
                                    const ros::Time &stamp,
                                    FeatureTiming &timing,
@@ -877,7 +872,7 @@ private:
         timing.corner_ds_removed = corner_ds_removed;
 
         stage_start = SteadyClock::now();
-        // 추출 좌표계가 map(extract_in_map_frame)이었다면 출력은 odom으로 되돌린다.
+        // 추출 좌표계가 odom 이 아니었다면(extract_frame) 출력은 odom으로 되돌린다.
         // planes/corners/feature_history 모두 colored에서 파생되므로 여기 한 번이면 된다.
         // (split_features_ms에 포함)
         if (T_back)

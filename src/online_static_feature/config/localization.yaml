@@ -57,20 +57,20 @@ online_static_feature_node:
   # dense_window_cloud가 이미 odom frame이라 추가 변환 불필요
   transform_with_pose: false
 
-  # 정적 feature를 추출하는 좌표계 (A/B 비교용 스위치. launch arg로도 덮어쓴다).
-  #   false: odom 좌표계에서 voxel/pillar 격자 구성 (기존 동작). 격자가 장면에 고정된다.
-  #   true : map_localizer가 직전 프레임에 낸 T_map_odom(C)을 window 전체에 똑같이 곱해
-  #          map 좌표계에서 격자를 구성한다. window 내부 상대 배치는 바뀌지 않고,
-  #          격자가 offline 맵과 같은 칸에 놓인다. 출력은 C^-1로 되돌려 여전히
-  #          odom 좌표계로 발행하므로 map_localizer 쪽은 바뀌지 않는다.
-  #          C가 프레임마다 흔들리면 그만큼 격자가 장면 위에서 움직인다는 점이 trade-off.
-  #   accumulated(raw) 조건은 이 노드를 안 거치므로 영향 없음.
-  extract_in_map_frame: true
-  # extract_frame 가 위 bool 을 대체한다 (bool 은 호환용: true 이고 extract_frame 이 odom 이면 map_live 로 동작).
-  #   odom     : 첫 스캔 센서 좌표계에서 격자 구성 (기존 기본)
-  #   map_init : 처음 받은 T_map_odom(= 초기 전역자세 ^W T_0) 하나를 고정해서 곱한 뒤 격자 구성.
-  #              격자는 장면에 고정된 채 수직축·위상만 map 기준이 된다. 초기 roll/pitch 가정 제거.
-  #   map_live : 매 프레임 최신 T_map_odom 을 곱한다 (= 예전 extract_in_map_frame=true).
+  # extract_frame: 정적 feature(voxel/pillar 격자)를 추출하는 좌표계 (launch arg로도 덮어쓴다).
+  #   odom 이 아니면 map_localizer가 직전 프레임에 낸 T_map_odom(C)에서 만든 T_extract를 window
+  #   전체에 똑같이 곱해 격자를 구성하고, 출력은 T_extract^-1로 되돌려 여전히 odom 좌표계로
+  #   발행하므로 map_localizer 쪽은 바뀌지 않는다. accumulated(raw) 조건은 이 노드를 안 거침.
+  #   (구 bool extract_in_map_frame 은 2026-11-10 제거)
+  #   odom       : 첫 스캔 센서 좌표계에서 격자 구성 (기본, 2026-11-10 확정)
+  #   map_init   : 처음 받은 T_map_odom(= 초기 전역자세 ^W T_0) 하나를 고정해서 곱한 뒤 격자 구성.
+  #                격자는 장면에 고정된 채 수직축·위상만 map 기준이 된다. 초기 roll/pitch 가정 제거.
+  #   map_live   : 매 프레임 최신 T_map_odom 을 곱한다.
+  #   odom_level : 최신 T_map_odom 의 roll·pitch 만 곱한다(yaw·translation 제거). 격자 원점·heading 은
+  #                odom 그대로, 수직축만 map(중력)에 맞춘다. 향후 IMU 중력으로 대체 가능한 자리.
+  # 2026-11-10 결과: 네 모드 간 정밀도(corr_lidar)·Isaac GT 차이 없음. fitness/src_points_used 는
+  #   odom 모드에서 추출 격자와 small_gicp 축약 격자(둘 다 0.5 m, odom 원점)가 일치해 생기는
+  #   artifact 때문에 모드 간 비교 지표로 쓸 수 없다 (CLAUDE.md 2.3).
   # launch 인자 extract_frame:=... 를 주면 이 값을 덮어쓴다.
   extract_frame: odom
   map_odom_topic: /map_localizer/map_odom_pose
