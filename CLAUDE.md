@@ -250,7 +250,7 @@ voxel(0.1~0.2m) → 같은 (i,j) voxel을 pillar로 묶어 판정. 동적/비정
      실행 간 편차 이내. offline 맵 생성 쪽(`offline_static_feature_ws`)에도 같은 규칙 반영(2026-11-10, 미커밋·
      맵 재생성 전). offline에만 있는 두 로직은 **의도적으로 유지**: (1) φ 통과 + 최상단 복셀 수평 →
      k_min만 보존(dense하게 쌓인 주차 차량 지붕 제거용), (2) 낮은 객체 필터(`use_low_object_filter`).
-   - 2026-11-11 수정 3건(online만, offline 미반영): (a) 점유율 분모 `k_span`→`k_span+1`(최댓값 1),
+   - 2026-11-11 수정 3건(online·offline 모두 반영, 맵 재생성 전): (a) 점유율 분모 `k_span`→`k_span+1`(최댓값 1),
      (b) 고윳값 비(`s_thresh`)로 탈락한 pillar도 k_min이 수평이면 그 복셀만 보존(φ 탈락과 같은 규칙),
      (c) 점유율 낮은 pillar에서 수평 조건을 통과한 k_min·k_max는 pillar PCA 재검사 없이 바로 출력
      (전에는 둘을 묶어 S를 계산해 간격 ~4 m 미만이면 둘 다 버려졌다). Isaac ATE 0.0708→0.0706 m(동일),
