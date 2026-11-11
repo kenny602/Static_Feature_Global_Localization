@@ -271,8 +271,8 @@ static Eigen::Vector3f voxelCentroid(const std::vector<Eigen::Vector3f> &pts)
 //  필터링 순서:
 //  [1] voxel PCA filter  : S >= voxel_s_thresh 인 voxel 제거
 //  [2] k_span filter     : k_span < H_min_voxel → pillar 전체 제거
-//  [3] fill_ratio filter : occupied_ratio <= fill_ratio_thresh 이면
-//                          k_min/k_max 근방만 유지, 사이 제거
+//  [3] fill_ratio filter : occupied/(k_span+1) <= fill_ratio_thresh 이면
+//                          수평인 k_min/k_max 만 유지(바로 출력), 사이 제거
 //  [4] normal 일관성     : PLANAR vs CORNER 분류
 // ─────────────────────────────────────────────────────────────────────────
 pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
@@ -507,7 +507,6 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
         }
  
         // ── [2-3] Per-pillar 통합 필터 ───────────────────────────────────
-        PillarData pillar_after_span;
         bool is_wall_pillar = true;
  
         if (params.use_span_filter && !ptr->voxels.empty())
@@ -535,9 +534,9 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
             }
  
             const int occupied = static_cast<int>(ptr->voxels.size());
-            const double fill_ratio = (k_span > 0)
-                ? static_cast<double>(occupied) / static_cast<double>(k_span)
-                : 1.0;
+            // 점유율 = 점유 복셀 수 / pillar가 걸친 복셀 칸 수(k_min~k_max 양끝 포함) → 최댓값 1
+            const double fill_ratio =
+                static_cast<double>(occupied) / static_cast<double>(k_span + 1);
  
             // per-pillar α_top (천장 유무 판정에 사용)
             const double alpha_top = alphaOfVoxel(vox_top);
@@ -643,34 +642,19 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
                 if (needs_height_filter && keep_top)
                     height_filter_voxel_keys[kv.first].insert(vox_top->k_index);
  
-                pillar_after_span.voxels.reserve(2);
- 
                 for (const auto *vox : ptr->voxels)
                 {
                     if (!vox) continue;
-                    const bool is_bot = (vox == vox_bot);
-                    const bool is_top = (vox == vox_top);
-                    const bool keep = (is_bot && keep_bot) || (is_top && keep_top);
-                    if (keep)
-                    {
-                        pillar_after_span.point_count += vox->points.size();
-                        pillar_after_span.voxels.push_back(vox);
-                    }
-                    else
-                    {
+                    const bool keep = (vox == vox_bot && keep_bot) || (vox == vox_top && keep_top);
+                    if (!keep)
                         out_fill_dynamic_count += static_cast<int>(vox->points.size());
-                    }
                 }
- 
-                // bot/top만 남은 경우 PLANAR 직접 출력 후 Stage 4 건너뜀
-                if (pillar_after_span.voxels.size() <= 1)
-                {
-                    if (keep_bot) emitPlanarVoxel(kv.first, vox_bot, true);
-                    if (keep_top && !keep_bot) emitPlanarVoxel(kv.first, vox_top, true);
-                    continue;
-                }
- 
-                ptr = &pillar_after_span;
+
+                // 수평 조건(horiz_normal_thresh)을 통과한 k_min(지면)·k_max(천장)은 그대로 출력한다.
+                // 서로 떨어진 두 복셀을 묶어 pillar PCA(s_thresh)를 다시 거는 것은 의미가 없다.
+                if (keep_bot) emitPlanarVoxel(kv.first, vox_bot, true);
+                if (keep_top) emitPlanarVoxel(kv.first, vox_top, true);
+                continue;
             }
         }
 
@@ -695,7 +679,20 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr classifyAllPillars(
         ++prof_pillars;
 
         if (lbl == Label::DYNAMIC || lbl == Label::SKIP)
-        { out_pillar_dynamic_count += static_cast<int>(ptr->point_count); continue; }
+        {
+            // 동적으로 탈락한 pillar도 φ 탈락(Case 2A)과 같이 k_min 복셀이 지면이면 그것만 살린다.
+            const VoxelPoints *bot = nullptr;
+            if (lbl == Label::DYNAMIC)
+            {
+                for (const auto *vox : ptr->voxels)
+                    if (vox && (!bot || vox->k_index < bot->k_index)) bot = vox;
+                if (bot && alphaOfVoxel(bot) < params.horiz_normal_thresh) bot = nullptr;
+            }
+            out_pillar_dynamic_count += static_cast<int>(ptr->point_count) -
+                                        (bot ? static_cast<int>(bot->points.size()) : 0);
+            if (bot) emitPlanarVoxel(kv.first, bot, true);
+            continue;
+        }
 
         storeSurvivedPillar(kv.first, *ptr);
 

@@ -247,8 +247,14 @@ voxel(0.1~0.2m) → 같은 (i,j) voxel을 pillar로 묶어 판정. 동적/비정
      나머지 복셀 전부**로 한다(2026-11-10 변경, 표본 1개면 평균 조건만). 이전에는 k_min·k_max를
      빼고 내부 복셀 ≥2일 때만 검사해서 2~3복셀 pillar는 검사 없이 k_min만 남기고 버렸다
      (fill 제거 점의 55~65 %). 변경 전후 Isaac ATE 0.0712→0.0709 m(동일), 노은역 정밀도도
-     실행 간 편차 이내. **offline 맵 생성 쪽(`offline_static_feature_ws`)은 아직 옛 규칙** —
-     맵을 새 규칙으로 다시 만들지 미정.
+     실행 간 편차 이내. offline 맵 생성 쪽(`offline_static_feature_ws`)에도 같은 규칙 반영(2026-11-10, 미커밋·
+     맵 재생성 전). offline에만 있는 두 로직은 **의도적으로 유지**: (1) φ 통과 + 최상단 복셀 수평 →
+     k_min만 보존(dense하게 쌓인 주차 차량 지붕 제거용), (2) 낮은 객체 필터(`use_low_object_filter`).
+   - 2026-11-11 수정 3건(online만, offline 미반영): (a) 점유율 분모 `k_span`→`k_span+1`(최댓값 1),
+     (b) 고윳값 비(`s_thresh`)로 탈락한 pillar도 k_min이 수평이면 그 복셀만 보존(φ 탈락과 같은 규칙),
+     (c) 점유율 낮은 pillar에서 수평 조건을 통과한 k_min·k_max는 pillar PCA 재검사 없이 바로 출력
+     (전에는 둘을 묶어 S를 계산해 간격 ~4 m 미만이면 둘 다 버려졌다). Isaac ATE 0.0708→0.0706 m(동일),
+     출력 점 +0.7 %.
 5. classifyPillar 자체 — pillar 전체 PCA S값 + normal 일관성(σ_θ, `n_bar`
    기준 각 θ의 평균/표준편차)로 PLANAR/CORNER/DYNAMIC 판정
 6. 2-pass 공간 필터 — unknown-space filter(고립 pillar 제거) + floor-height
